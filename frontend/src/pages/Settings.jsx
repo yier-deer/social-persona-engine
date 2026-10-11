@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useLocale } from '../LocaleContext'
+import { requestJson } from '../api'
 import ProviderSelector from '../components/ProviderSelector'
 import { useToast } from '../components/Toast'
 
@@ -12,38 +13,52 @@ export default function Settings() {
   const [loading, setLoading] = useState(true)
   const [showProvider, setShowProvider] = useState(false)
   const [showImageProvider, setShowImageProvider] = useState(false)
+  const [error, setError] = useState('')
+  const [loadAttempt, setLoadAttempt] = useState(0)
 
   useEffect(() => {
+    let cancelled = false
+    const controller = new AbortController()
+    setLoading(true)
+    setError('')
     Promise.all([
-      fetch('/api/config/key').then(r => r.json()),
-      fetch('/api/config/channels').then(r => r.json()),
-      fetch('/api/config/image-provider').then(r => r.json()),
+      requestJson('/api/config/key', { signal: controller.signal }),
+      requestJson('/api/config/channels', { signal: controller.signal }),
+      requestJson('/api/config/image-provider', { signal: controller.signal }),
     ]).then(([keyData, chData, imgData]) => {
+      if (cancelled) return
       setKeyCfg(keyData)
       setChannels(chData)
       setImageCfg(imgData)
-    }).finally(() => setLoading(false))
-  }, [])
+    }).catch(err => { if (!cancelled) setError(err.message) })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true; controller.abort() }
+  }, [loadAttempt])
 
-  const handleProviderSaved = () => {
+  const handleProviderSaved = async () => {
     setShowProvider(false)
-    fetch('/api/config/key').then(r => r.json()).then(d => setKeyCfg(d))
     toast.success(t('settings.saved'))
+    try { setKeyCfg(await requestJson('/api/config/key')) } catch (err) { setError(err.message) }
   }
 
-  const handleImageProviderSaved = () => {
+  const handleImageProviderSaved = async () => {
     setShowImageProvider(false)
-    fetch('/api/config/image-provider').then(r => r.json()).then(d => setImageCfg(d))
     toast.success(t('settings.imageSaved'))
+    try { setImageCfg(await requestJson('/api/config/image-provider')) } catch (err) { setError(err.message) }
   }
 
   const saveChannel = async (type, account) => {
+    const trimmed = account.trim()
+    if (trimmed && !/^\d{5,15}$/.test(trimmed)) {
+      toast.error(t('personaDetail.qqInvalid'))
+      return
+    }
     try {
-      await fetch('/api/config/channels', {
+      await requestJson('/api/config/channels', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ type, account }),
+        body: JSON.stringify({ type, account: trimmed }),
       })
-      const r = await fetch('/api/config/channels').then(r => r.json())
+      const r = await requestJson('/api/config/channels')
       setChannels(r)
       toast.success(t('settings.qqSaved'))
     } catch {
@@ -51,11 +66,12 @@ export default function Settings() {
     }
   }
 
-  if (loading) return null
+  if (loading) return <p className="text-sm text-ink-soft">{t('common.loading')}</p>
 
   return (
     <div className="animate-fade-up max-w-2xl mx-auto">
       <h1 className="font-serif text-2xl font-semibold text-jade-700 mb-8">{t('settings.title')}</h1>
+      {error && <div role="alert" className="text-sm text-red-600 mb-5">{error} <button onClick={() => setLoadAttempt(v => v + 1)} className="underline ml-3">{t('common.retry')}</button></div>}
 
       {/* Language */}
       <div className="glass-card rounded-2xl p-6 mb-5">
@@ -143,12 +159,14 @@ export default function Settings() {
         <h2 className="font-serif text-lg font-semibold text-jade-600 mb-4">{t('settings.channel')}</h2>
         <p className="text-xs text-ink-soft/60 mb-4 leading-relaxed">{t('settings.channelDesc')}</p>
         <div className="flex items-center gap-3">
-          <span className="text-sm font-medium text-ink w-16">{t('settings.channelLabel')}</span>
+          <label htmlFor="global-owner-qq" className="text-sm font-medium text-ink w-16 flex-shrink-0">{t('settings.channelLabel')}</label>
           <input
-            defaultValue={channels.qq || ''}
+            id="global-owner-qq" inputMode="numeric"
+            value={channels.qq || ''}
+            onChange={e => setChannels(prev => ({ ...prev, qq: e.target.value }))}
             placeholder={t('settings.channelPlaceholder')}
-            onBlur={e => { if (e.target.value !== channels.qq) saveChannel('qq', e.target.value) }}
-            className="flex-1 rounded-xl px-3 py-2.5 text-sm bg-white/60 border border-jade-600/10 focus:outline-none focus:border-jade-400/40"
+            onBlur={e => saveChannel('qq', e.target.value)}
+            className="flex-1 min-w-0 rounded-xl px-3 py-2.5 text-sm bg-white/60 border border-jade-600/10 focus:outline-none focus:border-jade-400/40"
           />
           <span className={`w-2 h-2 rounded-full ${channels.qq ? 'bg-jade-400' : 'bg-jade-600/15'}`} />
         </div>
@@ -240,6 +258,7 @@ export default function Settings() {
           initialProvider={keyCfg.provider}
           initialModel={keyCfg.model}
           initialUrl={keyCfg.baseUrl}
+          hasKey={keyCfg.hasKey}
           filterType="chat"
         />
       )}
@@ -250,6 +269,7 @@ export default function Settings() {
           initialProvider={imageCfg.imageProvider}
           initialModel={imageCfg.imageModel}
           initialUrl={imageCfg.imageBaseUrl}
+          hasKey={imageCfg.hasImageKey}
           endpoint="/api/config/image-provider"
           filterType="image"
         />

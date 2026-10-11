@@ -1,5 +1,6 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useLocale } from '../LocaleContext'
+import { requestJson } from '../api'
 
 export default function TestConnectionModal({ provider, apiKey, baseUrl, model, type, onClose, onConnected }) {
   const { t } = useLocale()
@@ -13,6 +14,7 @@ export default function TestConnectionModal({ provider, apiKey, baseUrl, model, 
   const [steps, setSteps] = useState(TEST_STEPS.map(s => ({ ...s, status: 'pending' })))
   const [result, setResult] = useState(null)
   const [running, setRunning] = useState(true)
+  const started = useRef(false)
 
   const updateStep = (id, status) => {
     setSteps(prev => prev.map(s => s.id === id ? { ...s, status } : s))
@@ -25,12 +27,12 @@ export default function TestConnectionModal({ provider, apiKey, baseUrl, model, 
       updateStep('send', 'done')
       updateStep('wait', 'active')
 
-      const res = await fetch('/api/config/test', {
+      const data = await requestJson('/api/config/test', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ provider, apiKey, baseUrl, model, type: type || 'chat' }),
       })
-      const data = await res.json()
+      if (typeof data.success !== 'boolean') throw new Error(t('providerSelector.networkError'))
 
       updateStep('wait', 'done')
       updateStep('verify', 'active')
@@ -41,12 +43,16 @@ export default function TestConnectionModal({ provider, apiKey, baseUrl, model, 
       setRunning(false)
     } catch (err) {
       setSteps(prev => prev.map(s => ({ ...s, status: s.status === 'active' ? 'error' : s.status })))
-      setResult({ success: false, error: t('providerSelector.networkError') + ': ' + err.message })
+      setResult({ success: false, error: err.message || t('providerSelector.networkError') })
       setRunning(false)
     }
   }
 
-  useEffect(() => { runTest() }, [])
+  useEffect(() => {
+    if (started.current) return
+    started.current = true
+    runTest()
+  }, [])
 
   const allDone = steps.every(s => s.status === 'done')
   const hasError = steps.some(s => s.status === 'error')

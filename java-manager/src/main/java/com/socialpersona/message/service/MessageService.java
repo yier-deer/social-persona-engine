@@ -34,8 +34,6 @@ import org.springframework.transaction.annotation.Transactional;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalTime;
@@ -98,7 +96,7 @@ public class MessageService {
     private final ExecutorService asyncImageExecutor = Executors.newCachedThreadPool();
 
     public void handleUserMessage(String personaId, String userMessage) {
-        log.info("handleUserMessage: persona={}, msg={}", personaId, userMessage);
+        log.debug("handleUserMessage: persona={}, length={}", personaId, userMessage == null ? 0 : userMessage.length());
 
         scanScheduler.registerPersona(personaId);
         interruptListener.interrupt(personaId);
@@ -110,12 +108,14 @@ public class MessageService {
             log.info("用户连发消息，中断上一次LLM调用: persona={}", personaId);
         }
 
+        boolean inferenceCompleted = false;
         try {
             Persona persona = personaService.getById(personaId);
             if (persona == null) {
                 log.warn("Persona 不存在: {}", personaId);
                 return;
             }
+            if (!"active".equals(persona.getStatus())) return;
 
             Map<String, Object> apiConfig = loadApiConfig();
 
@@ -214,17 +214,21 @@ public class MessageService {
             }
 
             MessageResponse response = pythonClient.handleMessage(request);
+            inferenceCompleted = true;
 
             // ★ 快速连发：检查是否被新消息取消
             if (!thisToken.equals(activeRequestTokens.get(personaId))) {
                 log.info("LLM返回但已被新消息取消: persona={}", personaId);
                 return;
             }
+            Persona currentPersona = personaService.getById(personaId);
+            if (currentPersona == null || !"active".equals(currentPersona.getStatus())) return;
 
             systemErrorHandler.resetFailCount(personaId);
 
             if (response == null) {
                 log.warn("Python 返回 null: persona={}", personaId);
+                recordSystemError(personaId, "invalid_model_response");
                 return;
             }
 
@@ -258,16 +262,37 @@ public class MessageService {
             applyDeltas(personaId, response.getRelationshipDeltas());
 
         } catch (Exception e) {
-            log.error("handleUserMessage 失败: persona={}, error={}", personaId, e.getMessage(), e);
+            if (!thisToken.equals(activeRequestTokens.get(personaId))) return;
+            String errorCode = inferenceCompleted ? "qq_delivery_failed" : "model_request_failed";
+            log.warn("消息处理失败: persona={}, code={}, type={}", personaId, errorCode, e.getClass().getSimpleName());
+            recordSystemError(personaId, errorCode);
+            if (inferenceCompleted) return;
 
             try {
                 Persona persona = personaService.getById(personaId);
-                int failCount = systemErrorHandler.incrementFailCount(personaId);
-                String fallback = systemErrorHandler.generateLlmFailReply(persona, failCount);
+                if (persona == null || !"active".equals(persona.getStatus())) return;
+                systemErrorHandler.incrementFailCount(personaId);
+                String fallback = "[系统提示] 模型服务暂时不可用，请检查配置或稍后重试。";
                 dispatchReply(personaId, fallback, "[]", "", null);
             } catch (Exception inner) {
-                log.error("降级回复也失败: persona={}, error={}", personaId, inner.getMessage());
+                log.warn("系统提示发送失败: persona={}, type={}", personaId, inner.getClass().getSimpleName());
             }
+        } finally {
+            activeRequestTokens.remove(personaId, thisToken);
+        }
+    }
+
+    private void recordSystemError(String personaId, String code) {
+        try {
+            EventLog entry = new EventLog();
+            entry.setId(UUID.randomUUID().toString());
+            entry.setPersonaId(personaId);
+            entry.setLogType("system_error");
+            entry.setDetailJson(objectMapper.writeValueAsString(Map.of("code", code)));
+            entry.setOccurredAt(Instant.now().toString());
+            eventLogMapper.insert(entry);
+        } catch (Exception e) {
+            log.warn("系统错误记录失败: persona={}, type={}", personaId, e.getClass().getSimpleName());
         }
     }
 
@@ -312,34 +337,8 @@ public class MessageService {
 
     @SuppressWarnings("unchecked")
     private Map<String, Object> loadApiConfig() {
-        try {
-            Path path = Path.of("./data/system_config.json");
-            if (!Files.exists(path)) return defaultApiConfig();
-            Map<String, Object> cfg = objectMapper.readValue(Files.readString(path), Map.class);
-            Map<String, Object> api = new LinkedHashMap<>();
-            api.put("provider", cfg.getOrDefault("provider", "deepseek"));
-            String encoded = cfg.getOrDefault("apiKeyEncrypted", "").toString();
-            String decoded = "";
-            if (!encoded.isEmpty()) {
-                try { decoded = new String(java.util.Base64.getDecoder().decode(encoded)); } catch (Exception e) { log.debug("apiKeyEncrypted Base64解码失败", e); }
-            }
-            api.put("api_key", decoded);
-            api.put("base_url", cfg.getOrDefault("baseUrl", "https://api.deepseek.com/v1"));
-            api.put("model", cfg.getOrDefault("model", "deepseek-chat"));
-
-            // ★ 嵌入模型配置（可选，用于 Mem0 向量化存储，推荐 SiliconFlow 免费 API）
-            Object ebUrl = cfg.get("embedderBaseUrl");
-            if (ebUrl != null) api.put("embedder_base_url", ebUrl.toString());
-            String ebEncoded = cfg.getOrDefault("embedderApiKeyEncrypted", "").toString();
-            if (!ebEncoded.isEmpty()) {
-                try { api.put("embedder_api_key", new String(java.util.Base64.getDecoder().decode(ebEncoded))); }
-                catch (Exception e) { log.debug("embedderApiKeyEncrypted Base64解码失败", e); }
-            }
-
-            return api;
-        } catch (Exception e) {
-            return defaultApiConfig();
-        }
+        Map<String, Object> config = personaService.loadGlobalApiConfig();
+        return config == null ? defaultApiConfig() : config;
     }
 
     private Map<String, Object> defaultApiConfig() {
@@ -467,8 +466,10 @@ public class MessageService {
         String now = Instant.now().toString();
 
         Persona persona = personaService.getById(personaId);
+        if (persona == null || !"active".equals(persona.getStatus())) return;
         String ownerQq = persona != null ? persona.getOwnerQq() : null;
         String qqMsg = "";
+        boolean delivered = false;
 
         // 解析 items, 处理图片
         @SuppressWarnings("unchecked")
@@ -490,10 +491,11 @@ public class MessageService {
                     String imgPath = generateAndGetImage(personaId, item);
                     if (imgPath != null) {
                         try {
-                            qqWs.sendImage(ownerQq, imgPath, qqMsg);
+                            qqWs.sendImage(persona.getAiQq(), ownerQq, imgPath, qqMsg);
+                            delivered = true;
                             qqMsg = "";
                         } catch (Exception e) {
-                            log.warn("发送图片失败: {}", e.getMessage());
+                            throw new IllegalStateException("QQ 图片发送失败，请检查 NapCat 连接");
                         }
                     }
                 } else if ("async".equals(mode)) {
@@ -501,7 +503,6 @@ public class MessageService {
                     String prompt = (String) item.getOrDefault("content_prompt", "");
                     if (!prompt.isEmpty()) {
                         interruptListener.register(personaId);
-                        String ownerQqFinal = ownerQq;
                         Map<String, Object> itemCopy = new LinkedHashMap<>(item);
                         asyncImageExecutor.submit(() -> {
                             try {
@@ -510,11 +511,14 @@ public class MessageService {
                                     return;
                                 }
                                 String imgPath = generateAndGetImage(personaId, itemCopy);
-                                if (imgPath != null && ownerQqFinal != null && !ownerQqFinal.isEmpty()) {
-                                    qqWs.sendImage(ownerQqFinal, imgPath, null);
+                                Persona current = personaService.getById(personaId);
+                                if (imgPath != null && current != null && "active".equals(current.getStatus())
+                                        && current.getOwnerQq() != null && !current.getOwnerQq().isEmpty()) {
+                                    qqWs.sendImage(current.getAiQq(), current.getOwnerQq(), imgPath, null);
                                 }
                             } catch (Exception e) {
-                                log.warn("Async图片生成失败: persona={}, error={}", personaId, e.getMessage());
+                                recordSystemError(personaId, "image_delivery_failed");
+                                log.warn("Async图片发送失败: persona={}, type={}", personaId, e.getClass().getSimpleName());
                             } finally {
                                 interruptListener.clear(personaId);
                             }
@@ -563,7 +567,7 @@ public class MessageService {
                 msg.setItemsJson(segItemsJson);
                 msg.setMood(mood);
                 msg.setInnerThoughtJson(innerThoughtJson);
-                msg.setIsSent(i == 0 ? 1 : 0);
+                msg.setIsSent(0);
                 messageMapper.insert(msg);
                 savedMsgs.add(msg);
             }
@@ -577,7 +581,7 @@ public class MessageService {
             msg.setItemsJson(itemsJson);
             msg.setMood(mood);
             msg.setInnerThoughtJson(innerThoughtJson);
-            msg.setIsSent(1);
+            msg.setIsSent(0);
             messageMapper.insert(msg);
             savedMsgs.add(msg);
         } else {
@@ -591,7 +595,7 @@ public class MessageService {
                 msg.setItemsJson(itemsJson);
                 msg.setMood(mood);
                 msg.setInnerThoughtJson(innerThoughtJson);
-                msg.setIsSent(i == 0 ? 1 : 0);
+                msg.setIsSent(0);
                 messageMapper.insert(msg);
                 savedMsgs.add(msg);
             }
@@ -618,10 +622,16 @@ public class MessageService {
                 qqMsg = textSegments[0].trim();
             }
             if (!qqMsg.isEmpty()) {
-                qqWs.sendReply(ownerQq, qqMsg);
-                log.info("QQ即时推送: owner={}, text={}", ownerQq,
-                        qqMsg.substring(0, Math.min(30, qqMsg.length())));
+                qqWs.sendReply(persona.getAiQq(), ownerQq, qqMsg);
+                delivered = true;
             }
+        }
+
+        if (delivered && !savedMsgs.isEmpty()) {
+            ScheduledMessage first = savedMsgs.get(0);
+            first.setIsSent(1);
+            first.setActualSendTime(Instant.now().toString());
+            messageMapper.updateById(first);
         }
 
         try {

@@ -5,10 +5,14 @@ import com.socialpersona.event.scheduler.EventTriggerScheduler;
 import com.socialpersona.persona.service.PersonaService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.server.ResponseStatusException;
 import org.springframework.web.bind.annotation.*;
 
 import java.io.*;
 import java.nio.file.*;
+import java.nio.charset.StandardCharsets;
 import java.util.*;
 
 @RestController
@@ -26,8 +30,8 @@ public class SystemConfigController {
         this.eventTriggerScheduler = eventTriggerScheduler;
     }
 
-    private static final String CONFIG_DIR = "./data";
-    private static final String CONFIG_FILE = CONFIG_DIR + "/system_config.json";
+    @Value("${app.config-file:./data/system_config.json}")
+    private String configFilePath = "./data/system_config.json";
 
     @GetMapping("/key")
     public Map<String, Object> getKeyConfig() {
@@ -41,17 +45,17 @@ public class SystemConfigController {
     }
 
     @PostMapping("/key")
-    public Map<String, String> saveKey(@RequestBody Map<String, String> body) {
+    public synchronized Map<String, String> saveKey(@RequestBody Map<String, String> body) {
         String provider = body.getOrDefault("provider", "deepseek");
         String apiKey = body.get("apiKey");
         String baseUrl = body.getOrDefault("baseUrl", "https://api.deepseek.com/v1");
         String model = body.getOrDefault("model", "deepseek-chat");
 
-        String obscured = apiKey != null ? Base64.getEncoder().encodeToString(apiKey.getBytes()) : "";
-
         Map<String, Object> cfg = readConfig();
         cfg.put("provider", provider);
-        cfg.put("apiKeyEncrypted", obscured);
+        if (apiKey != null && !apiKey.isBlank()) {
+            cfg.put("apiKeyEncrypted", Base64.getEncoder().encodeToString(apiKey.trim().getBytes(StandardCharsets.UTF_8)));
+        }
         cfg.put("baseUrl", baseUrl);
         cfg.put("model", model);
         writeConfig(cfg);
@@ -70,12 +74,15 @@ public class SystemConfigController {
     }
 
     @PostMapping("/channels")
-    public Map<String, String> saveChannel(@RequestBody Map<String, String> body) {
+    public synchronized Map<String, String> saveChannel(@RequestBody Map<String, String> body) {
         String type = body.get("type");
         String account = body.get("account");
+        if (!Set.of("qq", "wechat").contains(type != null ? type : "")) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "不支持的通信渠道");
+        }
 
         Map<String, Object> cfg = readConfig();
-        cfg.put(type, account != null ? account : "");
+        cfg.put(type, account != null ? account.trim() : "");
         writeConfig(cfg);
 
         if ("qq".equals(type) && account != null && !account.isEmpty()) {
@@ -101,7 +108,7 @@ public class SystemConfigController {
     }
 
     @PostMapping("/image-provider")
-    public Map<String, String> saveImageProvider(@RequestBody Map<String, String> body) {
+    public synchronized Map<String, String> saveImageProvider(@RequestBody Map<String, String> body) {
         String imageProvider = body.getOrDefault("imageProvider",
                 body.getOrDefault("provider", ""));
         String imageKey = body.getOrDefault("imageKey",
@@ -111,11 +118,11 @@ public class SystemConfigController {
         String imageModel = body.getOrDefault("imageModel",
                 body.getOrDefault("model", ""));
 
-        String obscured = imageKey != null ? Base64.getEncoder().encodeToString(imageKey.getBytes()) : "";
-
         Map<String, Object> cfg = readConfig();
         cfg.put("imageProvider", imageProvider);
-        cfg.put("imageApiKeyEncrypted", obscured);
+        if (imageKey != null && !imageKey.isBlank()) {
+            cfg.put("imageApiKeyEncrypted", Base64.getEncoder().encodeToString(imageKey.trim().getBytes(StandardCharsets.UTF_8)));
+        }
         cfg.put("imageBaseUrl", imageBaseUrl);
         cfg.put("imageModel", imageModel);
         writeConfig(cfg);
@@ -148,20 +155,35 @@ public class SystemConfigController {
     @SuppressWarnings("unchecked")
     private Map<String, Object> readConfig() {
         try {
-            Path path = Path.of(CONFIG_FILE);
+            Path path = Path.of(configFilePath);
             if (!Files.exists(path)) return new LinkedHashMap<>();
             return objectMapper.readValue(Files.readString(path), Map.class);
         } catch (Exception e) {
-            return new LinkedHashMap<>();
+            log.error("读取配置失败: {}", e.getClass().getSimpleName());
+            throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "无法读取配置文件");
         }
     }
 
     private void writeConfig(Map<String, Object> cfg) {
+        Path temporary = null;
         try {
-            Files.createDirectories(Path.of(CONFIG_DIR));
-            Files.writeString(Path.of(CONFIG_FILE), objectMapper.writeValueAsString(cfg));
+            Path path = Path.of(configFilePath).toAbsolutePath();
+            Files.createDirectories(path.getParent());
+            temporary = Files.createTempFile(path.getParent(), "system_config-", ".tmp");
+            Files.writeString(temporary, objectMapper.writeValueAsString(cfg), StandardCharsets.UTF_8);
+            try {
+                Files.move(temporary, path, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+            } catch (AtomicMoveNotSupportedException unsupported) {
+                Files.move(temporary, path, StandardCopyOption.REPLACE_EXISTING);
+            }
         } catch (IOException e) {
-            log.error("写入配置失败: {}", e.getMessage());
+            log.error("写入配置失败: {}", e.getClass().getSimpleName());
+            throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "无法保存配置文件");
+        } finally {
+            if (temporary != null) {
+                try { Files.deleteIfExists(temporary); }
+                catch (IOException ignored) { log.warn("配置临时文件清理失败"); }
+            }
         }
     }
 }

@@ -2,12 +2,16 @@ package com.socialpersona.health;
 
 import com.socialpersona.gateway.PythonClient;
 import com.socialpersona.gateway.dto.HealthResponse;
+import com.socialpersona.message.websocket.QQWebSocketHandler;
+import com.socialpersona.persona.service.PersonaService;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.redis.connection.RedisConnectionFactory;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.List;
 
 /**
  * Java 健康检查控制器
@@ -41,6 +45,15 @@ public class HealthController {
     @Autowired
     private PythonClient pythonClient;
 
+    @Autowired
+    private QQWebSocketHandler qqWs;
+
+    @Autowired
+    private RedisConnectionFactory redisFactory;
+
+    @Autowired
+    private PersonaService personaService;
+
     /**
      * ★ Java 管理端健康检查端点
      *
@@ -62,6 +75,7 @@ public class HealthController {
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("app", "social-persona-manager");
         result.put("javaStatus", "ok");
+        Map<String, Object> services = new LinkedHashMap<>();
 
         /*
          * 为什么用 try-catch 包裹 Python 调用：
@@ -72,13 +86,35 @@ public class HealthController {
         try {
             HealthResponse pythonHealth = pythonClient.health();
             result.put("pythonStatus", pythonHealth);
+            services.put("pythonCore", Map.of("status",
+                    pythonHealth != null && "ok".equals(pythonHealth.getStatus()) ? "connected" : "error"));
         } catch (Exception e) {
             // Python 不可达：不是 Java 的错，用 Map 告知前端状态而非抛异常
             Map<String, Object> unreachableInfo = new LinkedHashMap<>();
             unreachableInfo.put("status", "unreachable");
             unreachableInfo.put("error", "无法连接到 Python 核心服务 (http://127.0.0.1:8000)");
             result.put("pythonStatus", unreachableInfo);
+            services.put("pythonCore", Map.of("status", "disconnected"));
         }
+
+        try (var connection = redisFactory.getConnection()) {
+            services.put("redis", Map.of("status", "PONG".equals(connection.ping()) ? "connected" : "error", "optional", true));
+        } catch (Exception e) {
+            services.put("redis", Map.of("status", "disconnected", "optional", true));
+        }
+        List<String> botIds = qqWs.getConnectedBotIds();
+        if (botIds == null) botIds = List.of();
+        services.put("napcat", Map.of("status", botIds.isEmpty() ? "disconnected" : "connected", "botIds", botIds));
+        result.put("services", services);
+        Map<String, Object> apiConfig;
+        try {
+            apiConfig = personaService.loadGlobalApiConfig();
+        } catch (Exception ignored) {
+            apiConfig = Map.of();
+        }
+        if (apiConfig == null) apiConfig = Map.of();
+        Object apiKey = apiConfig.get("api_key");
+        result.put("llm", Map.of("status", apiKey instanceof String && !((String) apiKey).isBlank() ? "configured" : "unconfigured"));
 
         return result;
     }

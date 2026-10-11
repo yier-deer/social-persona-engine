@@ -161,6 +161,7 @@
     },
     "stepLabel": "Step",
     "creating": "Creating...",
+    "createFailed": "Creation failed: ",
     "createBtn": "Create Persona ✓",
     "successTitle": " Created",
     "successDesc": "Your persona is ready.",
@@ -340,6 +341,9 @@
     "statusActive": "Active",
     "statusPaused": "Paused",
     "statusArchived": "Archived",
+    "qqInvalid": "Enter a QQ number with 5 to 15 digits.",
+    "qqBindingHint": "The persona QQ logs in to NapCat. Owner QQ limits replies to your private messages.",
+    "qqIncomplete": "Configure both the persona and owner QQ numbers before checking message routing.",
     "qqPlaceholder": "Persona QQ",
     "qqTitle": "QQ account the persona logs in with (NapCat scan)",
     "relationship": "Relationship",
@@ -404,10 +408,13 @@
     "qqFooter": "NapCat project:",
     "saved": "Configuration saved",
     "imageSaved": "Image provider saved",
+    "channelSaved": "Owner QQ saved",
     "qqSaved": "QQ saved",
     "saveFailed": "Save failed. Please try again."
   },
   "providerSelector": {
+    "loadFailed": "Could not load model providers. Check that the manager service is running.",
+    "keepKey": "Leave blank to keep the API key already saved for this provider.",
     "title": "Configure Provider",
     "provider": "Provider",
     "providerLlama": "Local Model (ollama)",
@@ -544,5 +551,22 @@
     "advancedSection": "Advanced Settings",
     "advancedTip": "⚠️ Advanced settings affect core persona behavior. Not recommended for casual users.",
     "bigFiveDirect": "Big Five (Direct Control)"
+  },
+  "health": {
+    "title": "Service status",
+    "java": "Java manager is disconnected",
+    "python": "Python core connected",
+    "memory": "Memory store",
+    "connected": "Connected",
+    "configured": "Configured, not live-tested",
+    "unconfigured": "Not configured",
+    "disconnected": "Disconnected",
+    "unreachable": "Unreachable",
+    "uninitialized": "Not initialized",
+    "unknown": "Unknown",
+    "error": "Error",
+    "optional": "Not enabled (optional)",
+    "lastCheck": "Last checked:",
+    "llmHint": "Provider configuration does not confirm that a recent inference request succeeded."
   }
 }

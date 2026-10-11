@@ -1,7 +1,8 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import ProviderSelector from './ProviderSelector'
 import { useLocale } from '../LocaleContext'
+import { requestJson } from '../api'
 
 /**
  * 首次引导向导组件
@@ -14,13 +15,17 @@ export default function OnboardingWizard({ onComplete }) {
   const [data, setData] = useState({ qq: '' })
   const [visible, setVisible] = useState(false)
   const [exitAnim, setExitAnim] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+  const exitTimer = useRef(null)
 
   /**
    * 显示/隐藏逻辑全部交给父组件 App.jsx 决定（localStorage + API hasKey 双重检测）。
    * 只要父组件渲染了本组件，就进入出场动画。
    */
   useEffect(() => {
-    setTimeout(() => setVisible(true), 400)
+    const timer = setTimeout(() => setVisible(true), 400)
+    return () => { clearTimeout(timer); clearTimeout(exitTimer.current) }
   }, [])
 
   const handleLLMSaved = () => {
@@ -32,26 +37,38 @@ export default function OnboardingWizard({ onComplete }) {
   }
 
   const handleQQNext = async () => {
-    if (data.qq) {
-      await fetch('/api/config/channels', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ type: 'qq', account: data.qq }),
-      })
+    const account = data.qq.trim()
+    if (!/^\d{5,15}$/.test(account)) {
+      setError(t('personaDetail.qqInvalid'))
+      return
     }
-    setStep(3)
+    if (saving) return
+    setSaving(true)
+    setError('')
+    try {
+      await requestJson('/api/config/channels', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: 'qq', account }),
+      })
+      setStep(3)
+    } catch (err) {
+      setError(err.message || t('settings.saveFailed'))
+    } finally {
+      setSaving(false)
+    }
   }
 
   const handleSkip = () => {
     localStorage.setItem('hasConfigured', 'true')
     localStorage.setItem('hasSkipped', 'true')
     setExitAnim(true)
-    setTimeout(() => onComplete?.(), 400)
+    exitTimer.current = setTimeout(() => onComplete?.(), 400)
   }
 
   const handleFinishAndGo = (path) => {
     localStorage.setItem('hasConfigured', 'true')
     setExitAnim(true)
-    setTimeout(() => {
+    exitTimer.current = setTimeout(() => {
       onComplete?.()
       navigate(path)
     }, 400)
@@ -103,6 +120,7 @@ export default function OnboardingWizard({ onComplete }) {
             filterType="image"
             endpoint="/api/config/image-provider"
             onSave={handleImageSaved}
+            onSkip={() => setStep(2)}
             onClose={handleSkip}
           />
         </div>
@@ -128,6 +146,7 @@ export default function OnboardingWizard({ onComplete }) {
 
           <h2 className="font-serif text-xl font-semibold text-jade-700 mb-1">{t('onboarding.step2_title')}</h2>
           <p className="text-ink-soft text-sm mb-6">{t('onboarding.step2_desc')}</p>
+          {error && <p role="alert" className="text-sm text-red-600 mb-4">{error}</p>}
 
           <div className="space-y-4 mb-8">
             <div>
@@ -148,7 +167,7 @@ export default function OnboardingWizard({ onComplete }) {
               <button onClick={handleSkip} className="text-sm text-ink-soft/50 hover:text-ink-soft transition-colors">
                 {t('common.skipWizard')}
               </button>
-              <button onClick={handleQQNext} className="btn-jade text-sm">{t('common.next')} →</button>
+              <button onClick={handleQQNext} disabled={saving} className="btn-jade text-sm disabled:opacity-40">{t('common.next')} →</button>
             </div>
           </div>
         </div>

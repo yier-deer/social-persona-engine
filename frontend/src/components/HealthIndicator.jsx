@@ -1,130 +1,86 @@
-import { useState, useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { useLocale } from '../LocaleContext'
+import { requestJson } from '../api'
 
-/**
- * 健康指示器组件
- * 显示三个核心服务的状态圆点，点击可展开详细面板
- */
 export default function HealthIndicator() {
-  const [status, setStatus] = useState({ java: false, python: false, redis: false })
-  const [detail, setDetail] = useState(null)
+  const { t, locale } = useLocale()
+  const [health, setHealth] = useState(null)
   const [expanded, setExpanded] = useState(false)
   const [lastCheck, setLastCheck] = useState(null)
   const panelRef = useRef(null)
 
   useEffect(() => {
+    let cancelled = false
+    const controller = new AbortController()
     const check = async () => {
       try {
-        const r = await fetch('/api/health')
-        const j = await r.json()
-        setStatus({
-          java: j.javaStatus === 'ok',
-          python: j.pythonStatus?.status === 'ok',
-          redis: j.pythonStatus?.memory_connected ?? false,
-        })
-        setDetail({
-          javaVersion: j.javaStatus,
-          pythonModel: j.pythonStatus?.model,
-          pythonLatency: j.pythonStatus?.latency_ms,
-          redisInfo: j.pythonStatus?.memory_type,
-        })
-        setLastCheck(new Date())
+        const data = await requestJson('/api/health', { signal: controller.signal })
+        if (!cancelled) setHealth(data)
       } catch {
-        setStatus({ java: false, python: false, redis: false })
-        setDetail(null)
-        setLastCheck(new Date())
+        if (!cancelled) setHealth({ javaStatus: 'unreachable' })
+      } finally {
+        if (!cancelled) setLastCheck(new Date())
       }
     }
     check()
-    const iv = setInterval(check, 30000)
-    return () => clearInterval(iv)
+    const interval = setInterval(check, 30000)
+    return () => { cancelled = true; controller.abort(); clearInterval(interval) }
   }, [])
 
-  // 点击外部关闭面板
   useEffect(() => {
-    const handler = (e) => {
-      if (panelRef.current && !panelRef.current.contains(e.target)) {
-        setExpanded(false)
-      }
+    if (!expanded) return
+    const handler = event => {
+      if (panelRef.current && !panelRef.current.contains(event.target)) setExpanded(false)
     }
-    if (expanded) {
-      document.addEventListener('mousedown', handler)
-      return () => document.removeEventListener('mousedown', handler)
-    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
   }, [expanded])
 
-  const dots = [
-    { key: 'java', label: '引擎', icon: '⚙️' },
-    { key: 'python', label: 'LLM', icon: '🧠' },
-    { key: 'redis', label: '记忆', icon: '💾' },
+  const services = health?.services || {}
+  const java = health?.javaStatus === 'ok' ? 'connected' : 'disconnected'
+  const python = services.pythonCore?.status || (['ok', 'degraded'].includes(health?.pythonStatus?.status) ? 'connected' : 'disconnected')
+  const napcat = services.napcat?.status || 'disconnected'
+  const memory = services.memory?.status || (health?.pythonStatus?.memory_connected ? 'connected' : 'uninitialized')
+  const llm = services.llm?.status || health?.llm?.status || 'unknown'
+  const rows = [
+    { key: 'java', label: 'Java', status: java },
+    { key: 'python', label: 'Python', status: python },
+    { key: 'napcat', label: 'NapCat', status: napcat },
+    { key: 'llm', label: 'LLM', status: llm },
+    { key: 'memory', label: t('health.memory'), status: memory },
+    { key: 'redis', label: 'Redis', status: services.redis?.status || 'disconnected', optional: true },
   ]
-
-  const allHealthy = status.java && status.python && status.redis
+  const dots = rows.slice(0, 3)
+  const statusText = row => row.optional && row.status !== 'connected'
+    ? t('health.optional') : t('health.' + row.status)
+  const color = status => ['connected', 'configured'].includes(status) ? 'bg-jade-400'
+    : ['unknown', 'uninitialized', 'unconfigured'].includes(status) ? 'bg-amber-400' : 'bg-red-400'
 
   return (
     <div className="fixed bottom-4 right-4 z-50" ref={panelRef}>
-      {/* 展开面板 */}
       {expanded && (
-        <div className="glass-panel rounded-2xl p-5 mb-3 w-64 animate-fade-up shadow-xl">
-          <h4 className="font-serif text-sm font-semibold text-jade-700 mb-3">服务状态</h4>
+        <div className="glass-panel rounded-2xl p-5 mb-3 w-72 max-w-[calc(100vw-2rem)] animate-fade-up shadow-xl">
+          <h4 className="font-serif text-sm font-semibold text-jade-700 mb-3">{t('health.title')}</h4>
           <div className="space-y-3">
-            {dots.map(d => (
-              <div key={d.key} className="flex items-center gap-3">
-                <div className={`w-2 h-2 rounded-full flex-shrink-0 ${status[d.key] ? 'bg-jade-400' : 'bg-red-400'}`} />
-                <span className="text-xs text-ink-soft w-8">{d.label}</span>
-                <span className="text-xs text-ink flex-1">
-                  {status[d.key] ? '正常' : '离线'}
-                </span>
+            {rows.map(row => (
+              <div key={row.key} className="flex items-center gap-3">
+                <span className={'w-2 h-2 rounded-full flex-shrink-0 ' + (row.optional && row.status !== 'connected' ? 'bg-ink-soft/20' : color(row.status))} />
+                <span className="text-xs text-ink-soft w-16">{row.label}</span>
+                <span className="text-xs text-ink flex-1">{statusText(row)}</span>
               </div>
             ))}
           </div>
-
-          {/* 详细信息 */}
-          {detail && (
-            <div className="mt-3 pt-3 border-t border-jade-600/8 space-y-1.5">
-              {detail.pythonModel && (
-                <p className="text-[11px] text-ink-soft/60">
-                  模型: <span className="text-ink-soft">{detail.pythonModel}</span>
-                </p>
-              )}
-              {detail.pythonLatency !== undefined && (
-                <p className="text-[11px] text-ink-soft/60">
-                  延迟: <span className="text-ink-soft">{detail.pythonLatency}ms</span>
-                </p>
-              )}
-              {detail.redisInfo && (
-                <p className="text-[11px] text-ink-soft/60">
-                  存储: <span className="text-ink-soft">{detail.redisInfo}</span>
-                </p>
-              )}
-            </div>
-          )}
-
-          {lastCheck && (
-            <p className="text-[10px] text-ink-soft/30 mt-3">
-              上次检查: {lastCheck.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
-            </p>
-          )}
+          {services.napcat?.botIds?.length > 0 && <p className="text-xs text-ink-soft mt-3 break-all">{services.napcat.botIds.join(', ')}</p>}
+          <p className="text-[11px] text-ink-soft/60 mt-3 leading-relaxed">{t('health.llmHint')}</p>
+          {lastCheck && <p className="text-[10px] text-ink-soft/40 mt-3">{t('health.lastCheck')} {lastCheck.toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</p>}
         </div>
       )}
-
-      {/* 指示器圆点 */}
-      <button
-        onClick={() => setExpanded(v => !v)}
-        className={`flex items-center gap-2 glass-panel rounded-full px-3 py-1.5 transition-all hover:shadow-md ${expanded ? 'ring-2 ring-jade-400/30' : ''}`}
-        title="点击展开服务状态详情"
-      >
-        {dots.map(d => (
-          <div key={d.key} className="flex items-center gap-1">
-            <div className={`w-2 h-2 rounded-full transition-colors duration-500 ${
-              status[d.key] ? 'bg-jade-400' : 'bg-red-400'
-            }`} />
-            <span className="text-[10px] text-ink-soft/50">{d.label}</span>
-          </div>
-        ))}
-        {/* 全部正常时显示小勾 */}
-        {allHealthy && (
-          <span className="text-[10px] text-jade-500 ml-0.5">✓</span>
-        )}
+      <button onClick={() => setExpanded(value => !value)} aria-label={t('health.title')} aria-expanded={expanded}
+        className={'flex items-center gap-3 glass-panel rounded-full px-3 py-1.5 hover:shadow-md ' + (expanded ? 'ring-2 ring-jade-400/30' : '')}>
+        {dots.map(row => <span key={row.key} className="flex items-center gap-1">
+          <span className={'w-2 h-2 rounded-full ' + color(row.status)} />
+          <span className="text-[10px] text-ink-soft/60">{row.key === 'napcat' ? 'QQ' : row.label}</span>
+        </span>)}
       </button>
     </div>
   )

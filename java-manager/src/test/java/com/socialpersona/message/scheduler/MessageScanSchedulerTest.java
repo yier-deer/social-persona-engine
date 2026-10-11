@@ -4,6 +4,8 @@ import com.socialpersona.message.entity.ScheduledMessage;
 import com.socialpersona.message.repository.MessageMapper;
 import com.socialpersona.message.websocket.FrontendWebSocketHandler;
 import com.socialpersona.message.websocket.QQWebSocketHandler;
+import com.socialpersona.persona.entity.Persona;
+import com.socialpersona.persona.service.PersonaService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -34,12 +36,20 @@ public class MessageScanSchedulerTest {
     @Mock private MessageMapper messageMapper;
     @Mock private FrontendWebSocketHandler wsHandler;
     @Mock private QQWebSocketHandler qqWs;
+    @Mock private PersonaService personaService;
+    private Persona currentPersona;
 
     @InjectMocks
     private MessageScanScheduler scheduler;
 
     @BeforeEach
     public void setUp() {
+        currentPersona = new Persona();
+        currentPersona.setId("persona1");
+        currentPersona.setStatus("active");
+        currentPersona.setAiQq("bot-1");
+        currentPersona.setOwnerQq("1875552542");
+        lenient().when(personaService.getById("persona1")).thenReturn(currentPersona);
         scheduler.registerPersona("persona1");
         scheduler.setOwnerQq("persona1", "1875552542");
     }
@@ -140,7 +150,7 @@ public class MessageScanSchedulerTest {
         scheduler.secondScan();
 
         verify(wsHandler).sendToPersona(eq("persona1"), anyString());
-        verify(qqWs).sendReply(eq("1875552542"), eq("hello"));
+        verify(qqWs).sendReply(eq("bot-1"), eq("1875552542"), eq("hello"));
         verify(messageMapper).updateById(msg);
     }
 
@@ -208,6 +218,7 @@ public class MessageScanSchedulerTest {
     @Test
     public void testSecondWatchWithoutOwnerQq() {
         scheduler.setOwnerQq("persona1", null);
+        currentPersona.setOwnerQq(null);
 
         when(messageMapper.countInNextHour(eq("persona1"), anyString(), anyString())).thenReturn(3);
         scheduler.hourlyScan();
@@ -225,7 +236,7 @@ public class MessageScanSchedulerTest {
 
         scheduler.secondScan();
 
-        verify(qqWs, never()).sendReply(anyString(), anyString());
+        verify(qqWs, never()).sendReply(anyString(), anyString(), anyString());
     }
 
     // ==================== extractTextFromItems ====================
@@ -250,7 +261,7 @@ public class MessageScanSchedulerTest {
 
         scheduler.secondScan();
 
-        verify(qqWs).sendReply("1875552542", "only text");
+        verify(qqWs).sendReply("bot-1", "1875552542", "only text");
         verify(wsHandler).sendToPersona(eq("persona1"), anyString());
     }
 

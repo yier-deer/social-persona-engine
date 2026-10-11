@@ -2,6 +2,7 @@ import { useState, useRef, useEffect } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
 import LoadingSpinner from '../components/LoadingSpinner'
 import { useLocale } from '../LocaleContext'
+import { requestJson } from '../api'
 
 export default function CreatePersona() {
   const { t, locale } = useLocale()
@@ -17,27 +18,34 @@ export default function CreatePersona() {
   const [creationSteps, setCreationSteps] = useState([])
   const [createdPersonaId, setCreatedPersonaId] = useState(null)
   const [createdName, setCreatedName] = useState('')
+  const [error, setError] = useState('')
+  const [startAttempt, setStartAttempt] = useState(0)
 
   useEffect(() => {
-    fetch('/api/matchmaker/start', {
+    let cancelled = false
+    const controller = new AbortController()
+    setLoading(true)
+    setError('')
+    setSessionId(null)
+    requestJson('/api/matchmaker/start', {
       method: 'POST',
+      signal: controller.signal,
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ languageHint: locale === 'en' ? 'en' : '' })
     })
-      .then(r => {
-        if (!r.ok) throw new Error('HTTP ' + r.status)
-        return r.json()
-      })
       .then(data => {
+        if (cancelled) return
+        if (!data.sessionId || typeof data.reply !== 'string') throw new Error('Invalid interview session')
         setSessionId(data.sessionId)
         setCurrentStage(data.currentStage)
         setMessages([{ role: 'matchmaker', content: data.reply }])
       })
-      .catch((err) => {
-        console.error('matchmaker start failed', err)
-        setMessages([{ role: 'matchmaker', content: t('createPersona.connectingError') }])
+      .catch(() => {
+        if (!cancelled) setError(t('createPersona.connectingError'))
       })
-  }, [])
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true; controller.abort() }
+  }, [startAttempt])
 
   useEffect(() => {
     chatEnd.current?.scrollIntoView({ behavior: 'smooth' })
@@ -45,19 +53,20 @@ export default function CreatePersona() {
 
   const sendMessage = async () => {
     const text = input.trim()
-    if (!text || loading || completed) return
+    if (!sessionId || !text || loading || completed) return
 
     setInput('')
     setMessages(prev => [...prev, { role: 'user', content: text }])
     setLoading(true)
+    setError('')
 
     try {
-      const res = await fetch('/api/matchmaker/chat', {
+      const data = await requestJson('/api/matchmaker/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ sessionId, userMessage: text, languageHint: locale === 'en' ? 'en' : '' }),
       })
-      const data = await res.json()
+      if (typeof data.reply !== 'string' || !data.currentStage) throw new Error(t('createPersona.serverError'))
 
       setMessages(prev => [...prev, { role: 'matchmaker', content: data.reply }])
       setCurrentStage(data.currentStage)
@@ -65,14 +74,17 @@ export default function CreatePersona() {
         setCompleted(true)
       }
     } catch (err) {
-      console.error('matchmaker chat failed', err)
-      setMessages(prev => [...prev, { role: 'matchmaker', content: t('createPersona.serverError') }])
+      setError(err.message || t('createPersona.serverError'))
+      setInput(text)
+      setMessages(prev => prev.slice(0, -1))
     } finally {
       setLoading(false)
     }
   }
 
   const handleConfirm = async () => {
+    if (!sessionId || creating) return
+    setError('')
     setCreating(true)
     const steps = [
       { id: 'generate', label: t('createPersona.creationSteps.generate'), status: 'pending' },
@@ -88,37 +100,27 @@ export default function CreatePersona() {
 
     try {
       updateStep('generate', 'active')
-      await delay(800)
-      updateStep('generate', 'done')
-
-      updateStep('init', 'active')
-      await delay(600)
-      updateStep('init', 'done')
-
-      updateStep('events', 'active')
-      await delay(600)
-      updateStep('events', 'done')
-
-      const res = await fetch(`/api/matchmaker/confirm?sessionId=${sessionId}&masterKey=demo${locale === 'en' ? '&languageHint=en' : ''}`, {
+      const query = new URLSearchParams({ sessionId })
+      if (locale === 'en') query.set('languageHint', 'en')
+      const data = await requestJson(`/api/matchmaker/confirm?${query}`, {
         method: 'POST',
       })
-      const data = await res.json()
-      if (data.complete) {
-        updateStep('done', 'done')
+      if (data.complete && data.personaId) {
+        setCreationSteps(steps.map(s => ({ ...s, status: 'done' })))
         setCreatedPersonaId(data.personaId)
         // 直接从 API 返回的 name 字段读取，不依赖正则匹配
         try {
-          const pd = await fetch(`/api/personas/${data.personaId}`).then(r => r.json())
+          const pd = await requestJson(`/api/personas/${data.personaId}`)
           setCreatedName(pd.name || t('personaList.unknownName'))
-        } catch (err) { console.error('fetch persona name failed', err); setCreatedName(t('personaList.unknownName')) }
+        } catch { setCreatedName(t('personaList.unknownName')) }
       } else {
         const failSteps = steps.map(s => ({ ...s, status: s.status === 'pending' ? 'error' : s.status }))
         setCreationSteps(failSteps)
-        alert(t('createPersona.createFailed') + (data.reply || t('createPersona.unknownError')))
+        setError(t('createPersona.createFailed') + (data.reply || t('createPersona.unknownError')))
         setCreating(false)
       }
     } catch (err) {
-      console.error('persona confirm/create failed', err)
+      setError(t('createPersona.createFailed') + err.message)
       setCreationSteps(prev => prev.map(s => ({ ...s, status: s.status === 'active' ? 'error' : s.status })))
       setCreating(false)
     }
@@ -153,6 +155,10 @@ export default function CreatePersona() {
         )}
       </div>
 
+      {error && <div role="alert" className="text-sm text-red-600 mb-4">
+        {error}
+        {!sessionId && <button onClick={() => setStartAttempt(v => v + 1)} disabled={loading} className="underline ml-3">{t('common.retry')}</button>}
+      </div>}
       <div className="glass-panel rounded-3xl overflow-hidden">
         <div className="h-[28rem] overflow-y-auto px-5 py-4 space-y-4">
           {messages.map((msg, i) => (
@@ -201,14 +207,15 @@ export default function CreatePersona() {
                 onKeyDown={handleKeyDown}
                 placeholder={t('createPersona.placeholder')}
                 rows={2}
-                disabled={loading}
-                className="flex-1 resize-none rounded-2xl px-4 py-3 text-sm bg-white/60 border border-jade-600/12
+                disabled={loading || !sessionId}
+                className="flex-1 min-w-0 resize-none rounded-2xl px-4 py-3 text-sm bg-white/60 border border-jade-600/12
                            focus:outline-none focus:border-jade-400/40 focus:ring-2 focus:ring-jade-400/10
                            placeholder:text-ink-soft/40 transition-all duration-300"
               />
               <button
                 onClick={sendMessage}
-                disabled={loading || !input.trim()}
+                disabled={loading || !sessionId || !input.trim()}
+                aria-label={t('createPersona.send')}
                 className="self-end w-11 h-11 rounded-full flex items-center justify-center flex-shrink-0
                            disabled:opacity-30 transition-all duration-300 shadow-md"
                 style={{

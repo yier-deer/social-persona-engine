@@ -58,4 +58,9 @@ public interface MessageMapper extends BaseMapper<ScheduledMessage> {
     List<ScheduledMessage> findDueThisSecond(@Param("personaId") String personaId,
                                               @Param("nowTime") String nowTime,
                                               @Param("oneSecondAgo") String oneSecondAgo);
+
+    List<ScheduledMessage> findDue(@Param("personaId") String personaId,
+                                   @Param("nowInstant") String nowInstant,
+                                   @Param("localTime") String localTime,
+                                   @Param("limit") int limit);
 }

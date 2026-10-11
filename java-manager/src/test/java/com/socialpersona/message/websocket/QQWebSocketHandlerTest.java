@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.*;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.context.ApplicationContext;
 
 import java.util.Map;
@@ -43,6 +44,8 @@ public class QQWebSocketHandlerTest {
 
     @BeforeEach
     public void setUp() throws Exception {
+        ((java.util.Map<?, ?>) ReflectionTestUtils.getField(QQWebSocketHandler.class, "napCatSessions")).clear();
+        ReflectionTestUtils.setField(QQWebSocketHandler.class, "applicationContext", null);
         handler = new QQWebSocketHandler(personaService);
 
         testPersona = new Persona();
@@ -50,6 +53,7 @@ public class QQWebSocketHandlerTest {
         testPersona.setName("小奈");
         testPersona.setAiQq("2387511709");
         testPersona.setOwnerQq("1875552542");
+        testPersona.setStatus("active");
     }
 
     @Test
@@ -76,12 +80,13 @@ public class QQWebSocketHandlerTest {
 
     @Test
     public void testHeartbeatTriggersLazyEventCheck() throws Exception {
+        when(session.isOpen()).thenReturn(true);
         String heartbeat = """
-            {"post_type":"meta_event","meta_event_type":"heartbeat","status":{"online":true,"self_id":"2387511709"}}
+            {"post_type":"meta_event","meta_event_type":"heartbeat","self_id":"2387511709","status":{"online":true}}
             """;
         handler.onMessage(heartbeat, session);
 
-        verify(personaService).findByAiQQ("2387511709");
+        assertEquals(java.util.List.of("2387511709"), handler.getConnectedBotIds());
     }
 
     // ==================== ★ 核心路由：主人私聊 ====================
@@ -184,12 +189,11 @@ public class QQWebSocketHandlerTest {
 
     @Test
     public void testSendReplyWithoutConnection() {
-        handler.sendReply("1875552542", "test");
+        assertThrows(IllegalStateException.class, () -> handler.sendReply("2387511709", "1875552542", "test"));
     }
 
     @Test
     public void testSendImageWithCaption() throws Exception {
-        when(session.getId()).thenReturn("napcat-1");
         when(session.isOpen()).thenReturn(true);
         when(session.getBasicRemote()).thenReturn(basicRemote);
 
@@ -207,7 +211,6 @@ public class QQWebSocketHandlerTest {
 
     @Test
     public void testSendImageSendsText() throws Exception {
-        when(session.getId()).thenReturn("napcat-1");
         when(session.isOpen()).thenReturn(true);
         when(session.getBasicRemote()).thenReturn(basicRemote);
 
@@ -224,7 +227,6 @@ public class QQWebSocketHandlerTest {
 
     @Test
     public void testSendReplyWithConnection() throws Exception {
-        when(session.getId()).thenReturn("test-session");
         when(session.isOpen()).thenReturn(true);
         when(session.getBasicRemote()).thenReturn(basicRemote);
 

@@ -7,13 +7,11 @@ import org.springframework.core.io.ClassPathResource;
 import org.springframework.http.*;
 import org.springframework.web.bind.annotation.*;
 
-import javax.net.ssl.*;
 import java.io.InputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
-import java.security.cert.X509Certificate;
 import java.time.Duration;
 import java.util.*;
 
@@ -92,7 +90,6 @@ public class ProviderController {
         try {
             HttpClient client = HttpClient.newBuilder()
                     .connectTimeout(Duration.ofSeconds(10))
-                    .sslContext(trustAllSsl())
                     .build();
 
             HttpRequest.Builder reqBuilder = HttpRequest.newBuilder()
@@ -198,7 +195,6 @@ public class ProviderController {
 
             HttpClient client = HttpClient.newBuilder()
                     .connectTimeout(Duration.ofSeconds(10))
-                    .sslContext(trustAllSsl())
                     .build();
 
             HttpResponse<String> resp = client.send(req.build(), HttpResponse.BodyHandlers.ofString());
@@ -214,7 +210,7 @@ public class ProviderController {
                 if (resp.statusCode() == 401) errMsg += "Key 无效或已过期";
                 else if (resp.statusCode() == 404) errMsg += "接口地址或模型名错误";
                 else if (resp.statusCode() == 429) errMsg += "请求太频繁，稍后重试";
-                else errMsg += resp.body().substring(0, Math.min(100, resp.body().length()));
+                else errMsg += "提供商返回错误，请检查配置";
                 return Map.of("success", false, "error", errMsg);
             }
         } catch (java.net.ConnectException e) {
@@ -222,8 +218,8 @@ public class ProviderController {
         } catch (java.net.http.HttpTimeoutException e) {
             return Map.of("success", false, "error", "连接超时 — 地址不通或网络太慢");
         } catch (Exception e) {
-            log.error("连接测试异常: {}", e.getMessage());
-            return Map.of("success", false, "error", e.getClass().getSimpleName() + ": " + e.getMessage());
+            log.warn("连接测试失败: {}", e.getClass().getSimpleName());
+            return Map.of("success", false, "error", "连接测试失败，请检查地址、证书和提供商配置");
         }
     }
 
@@ -289,18 +285,4 @@ public class ProviderController {
         }
     }
 
-    private static SSLContext trustAllSsl() {
-        try {
-            SSLContext ctx = SSLContext.getInstance("TLS");
-            ctx.init(null, new TrustManager[]{new X509TrustManager() {
-                public void checkClientTrusted(X509Certificate[] c, String a) {}
-                public void checkServerTrusted(X509Certificate[] c, String a) {}
-                public X509Certificate[] getAcceptedIssuers() { return new X509Certificate[0]; }
-            }}, new java.security.SecureRandom());
-            return ctx;
-        } catch (Exception e) {
-            log.warn("SSL上下文创建失败", e);
-            return null;
-        }
-    }
 }

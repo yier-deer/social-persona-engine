@@ -60,7 +60,7 @@
     "step2_label": "QQ 号",
     "step2_placeholder": "例如 123456789",
     "step3_title": "准备就绪",
-    "step3_desc1": "LLM 已配置、图像模型已就绪、QQ 号已绑定。",
+    "step3_desc1": "模型设置和主人 QQ 已保存。图片模型可稍后配置。",
     "step3_desc2": "现在让牵线人帮你创建第一个 AI 网友吧。",
     "step3_btn": "去牵线人界面创建 AI",
     "step3_footer": "配置随时可在设置页修改"
@@ -161,6 +161,7 @@
     },
     "stepLabel": "步骤",
     "creating": "创建中…",
+    "createFailed": "创建失败：",
     "createBtn": "创建 AI 网友 ✓",
     "successTitle": " 已创建",
     "successDesc": "你的 AI 网友已成功诞生",
@@ -340,6 +341,9 @@
     "statusActive": "活跃",
     "statusPaused": "已暂停",
     "statusArchived": "已归档",
+    "qqInvalid": "请输入 5 到 15 位 QQ 号码",
+    "qqBindingHint": "AI 小号登录 NapCat；主人 QQ 用于限制消息仅回复你的私聊。",
+    "qqIncomplete": "请配置 AI 小号和主人 QQ 后再验证消息路由。",
     "qqPlaceholder": "AI的QQ号",
     "qqTitle": "AI 登录的 QQ 号（NapCat 扫码的号）",
     "relationship": "关系",
@@ -404,10 +408,13 @@
     "qqFooter": "NapCat 项目:",
     "saved": "配置已保存",
     "imageSaved": "图片模型已保存",
+    "channelSaved": "主人 QQ 已保存",
     "qqSaved": "QQ 已保存",
     "saveFailed": "保存失败，请重试"
   },
   "providerSelector": {
+    "loadFailed": "无法读取模型提供商列表，请检查管理服务。",
+    "keepKey": "留空表示保留当前已保存的 API Key。",
     "title": "配置模型",
     "provider": "提供商",
     "providerLlama": "本地模型 (ollama)",
@@ -544,5 +551,22 @@
     "advancedSection": "高级设置",
     "advancedTip": "⚠️ 高级设置影响 AI 的核心行为模式，不建议普通用户修改。",
     "bigFiveDirect": "大五人格（直接控制）"
+  },
+  "health": {
+    "title": "服务状态",
+    "java": "Java 管理服务未连接",
+    "python": "Python 核心已连接",
+    "memory": "记忆存储",
+    "connected": "已连接",
+    "configured": "已配置，尚未实时验证",
+    "unconfigured": "未配置",
+    "disconnected": "未连接",
+    "unreachable": "不可达",
+    "uninitialized": "未初始化",
+    "unknown": "未知",
+    "error": "错误",
+    "optional": "未启用（可选）",
+    "lastCheck": "上次检查：",
+    "llmHint": "模型配置状态不代表最近一次推理请求成功。"
   }
 }

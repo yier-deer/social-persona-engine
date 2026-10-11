@@ -171,7 +171,7 @@ class MatchmakerResponse(BaseModel):
 class HealthResponse(BaseModel):
     """健康检查响应"""
     status: str = "ok"
-    llm_connected: bool = True
+    llm_connected: Optional[bool] = None
     memory_connected: bool = True
     uptime_seconds: int = 0
 

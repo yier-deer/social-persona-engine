@@ -100,6 +100,7 @@ export default function ManualCreate() {
   const [saving, setSaving] = useState(false)
   const [created, setCreated] = useState(null)
   const [showAdvanced, setShowAdvanced] = useState(false)
+  const [error, setError] = useState('')
 
   const [form, setForm] = useState({
     // 基础画像
@@ -171,7 +172,9 @@ export default function ManualCreate() {
   }
 
   const buildAndSave = async () => {
+    if (saving) return
     setSaving(true)
+    setError('')
     try {
       const bigFive = showAdvanced
         ? {
@@ -249,13 +252,14 @@ export default function ManualCreate() {
         body: JSON.stringify(config),
       })
       const data = await r.json()
+      if (!r.ok || data.status !== 'ok') {
+        throw new Error(data.message || `HTTP ${r.status}`)
+      }
       if (data.status === 'ok') {
         setCreated({ id: data.id, name: form.name || '新AI' })
-      } else {
-        alert('创建失败：' + (data.message || '未知错误'))
       }
     } catch (e) {
-      alert('创建失败：' + e.message)
+      setError(t('manualCreate.createFailed') + e.message)
     } finally {
       setSaving(false)
     }
@@ -358,6 +362,8 @@ export default function ManualCreate() {
       </div>
 
       <StepProgress />
+
+      {error && <p role="alert" className="text-sm text-red-600 mb-4">{error}</p>}
 
       <div className="glass-card rounded-2xl p-6">
         {renderStepContent()}

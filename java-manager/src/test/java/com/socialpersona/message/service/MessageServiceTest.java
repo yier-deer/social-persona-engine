@@ -24,8 +24,10 @@ import com.socialpersona.relationship.entity.RelationshipState;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.io.TempDir;
 import org.mockito.*;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -65,9 +67,17 @@ public class MessageServiceTest {
     private MessageService messageService;
 
     private Persona testPersona;
+    @TempDir private java.nio.file.Path configDirectory;
+    private java.nio.file.Path configPath;
 
     @BeforeEach
-    public void setUp() {
+    public void setUp() throws Exception {
+        configPath = configDirectory.resolve("system_config.json");
+        java.nio.file.Files.writeString(configPath, "{}");
+        PersonaService configReader = new PersonaService();
+        ReflectionTestUtils.setField(configReader, "configFilePath", configPath.toString());
+        lenient().when(personaService.loadGlobalApiConfig()).thenAnswer(call -> configReader.loadGlobalApiConfig());
+        lenient().when(personaService.loadImageApiConfig()).thenAnswer(call -> configReader.loadImageApiConfig());
         testPersona = new Persona();
         testPersona.setId("d926f28e-ea21-4f6a-8d69-9ed3dba6052b");
         testPersona.setName("小奈");
@@ -149,7 +159,7 @@ public class MessageServiceTest {
                 "[]", "happy", null
         );
 
-        verify(qqWs).sendReply(eq("1875552542"), eq("今天天气真好"));
+        verify(qqWs).sendReply(eq("2387511709"), eq("1875552542"), eq("今天天气真好"));
         verify(scanScheduler).setOwnerQq("d926f28e-ea21-4f6a-8d69-9ed3dba6052b", "1875552542");
         verify(scanScheduler).onMessageListChanged();
         verify(eventLogMapper, never()).insert(any(EventLog.class));
@@ -169,7 +179,7 @@ public class MessageServiceTest {
                 "{\"raw_thought\":\"还不错\",\"attitude\":\"positive\"}"
         );
 
-        verify(qqWs).sendReply(eq("1875552542"), eq("你好呀"));
+        verify(qqWs).sendReply(eq("2387511709"), eq("1875552542"), eq("你好呀"));
         verify(eventLogMapper).insert(any(EventLog.class));
     }
 
@@ -189,7 +199,7 @@ public class MessageServiceTest {
 
         verify(pythonClient).handleMessage(any(MessageRequest.class));
         // dispatchReply 不应被调用
-        verify(qqWs, never()).sendReply(anyString(), anyString());
+        verify(qqWs, never()).sendReply(anyString(), anyString(), anyString());
     }
 
     /**
@@ -203,7 +213,8 @@ public class MessageServiceTest {
 
         messageService.handleUserMessage("d926f28e-ea21-4f6a-8d69-9ed3dba6052b", "你好");
 
-        verify(qqWs, never()).sendReply(anyString(), anyString());
+        verify(qqWs, never()).sendReply(anyString(), anyString(), anyString());
+        verify(eventLogMapper, atLeastOnce()).insert(argThat((EventLog log) -> "system_error".equals(log.getLogType())));
     }
 
     /**
@@ -216,7 +227,7 @@ public class MessageServiceTest {
         messageService.handleUserMessage("nonexistent", "你好");
 
         verify(pythonClient, never()).handleMessage(any());
-        verify(qqWs, never()).sendReply(anyString(), anyString());
+        verify(qqWs, never()).sendReply(anyString(), anyString(), anyString());
     }
 
     /**
@@ -230,12 +241,11 @@ public class MessageServiceTest {
                 .thenThrow(new RuntimeException("Python 超时"));
 
         when(systemErrorHandler.incrementFailCount("d926f28e-ea21-4f6a-8d69-9ed3dba6052b")).thenReturn(1);
-        when(systemErrorHandler.generateLlmFailReply(testPersona, 1)).thenReturn("信号不太好，等一下哈。");
 
         messageService.handleUserMessage("d926f28e-ea21-4f6a-8d69-9ed3dba6052b", "你好");
 
         // 验证降级回复被推送
-        verify(qqWs, atLeastOnce()).sendReply(anyString(), contains("信号不太好"));
+        verify(qqWs, atLeastOnce()).sendReply(anyString(), anyString(), contains("[系统提示]"));
         verify(systemErrorHandler).incrementFailCount("d926f28e-ea21-4f6a-8d69-9ed3dba6052b");
     }
 
@@ -274,7 +284,7 @@ public class MessageServiceTest {
     @Test
     public void testImageConfigNullWhenNotConfigured() throws Exception {
         // 保存原始配置，清空图片字段，保证 loadImageApiConfig 返回 null
-        java.nio.file.Path cfgPath = java.nio.file.Path.of("./data/system_config.json");
+        java.nio.file.Path cfgPath = configPath;
         boolean existed = java.nio.file.Files.exists(cfgPath);
         byte[] backup = existed ? java.nio.file.Files.readAllBytes(cfgPath) : null;
         try {
@@ -385,7 +395,7 @@ public class MessageServiceTest {
                 "[]", null, null
         );
 
-        verify(qqWs, never()).sendReply(anyString(), anyString());
+        verify(qqWs, never()).sendReply(anyString(), anyString(), anyString());
     }
 
     // ==================== dispatchReply 多段文本 ====================
@@ -413,7 +423,7 @@ public class MessageServiceTest {
         assertEquals(0, msgs.get(2).getIsSent(), "第三条应标记未发送");
 
         // 仅第一条推 QQ
-        verify(qqWs).sendReply(anyString(), eq("第一段"));
+        verify(qqWs).sendReply(eq("2387511709"), anyString(), eq("第一段"));
     }
 
     // ==================== 图片管线全流程 ====================
@@ -423,7 +433,7 @@ public class MessageServiceTest {
      */
     @Test
     public void testDispatchReplyWithImageItemFullPipeline() throws Exception {
-        java.nio.file.Path cfgPath = java.nio.file.Path.of("./data/system_config.json");
+        java.nio.file.Path cfgPath = configPath;
         boolean existed = java.nio.file.Files.exists(cfgPath);
         byte[] backup = existed ? java.nio.file.Files.readAllBytes(cfgPath) : null;
         try {
@@ -455,10 +465,10 @@ public class MessageServiceTest {
                     "随便", itemsJson, null, null);
 
             verify(pythonClient).generateImage(any(ImageGenerateRequest.class));
-            verify(qqWs).sendImage(eq("1875552542"),
+            verify(qqWs).sendImage(eq("2387511709"), eq("1875552542"),
                     org.mockito.ArgumentMatchers.contains("1.jpg"),
                     org.mockito.ArgumentMatchers.contains("啧，给你看一眼"));
-            verify(qqWs, never()).sendReply(eq("1875552542"),
+            verify(qqWs, never()).sendReply(eq("2387511709"), eq("1875552542"),
                     org.mockito.ArgumentMatchers.contains("校园风景"));
         } finally {
             if (backup != null) java.nio.file.Files.write(cfgPath, backup);
@@ -470,7 +480,7 @@ public class MessageServiceTest {
      */
     @Test
     public void testDispatchReplyImageApiFailsStillSendsText() throws Exception {
-        java.nio.file.Path cfgPath = java.nio.file.Path.of("./data/system_config.json");
+        java.nio.file.Path cfgPath = configPath;
         boolean existed = java.nio.file.Files.exists(cfgPath);
         byte[] backup = existed ? java.nio.file.Files.readAllBytes(cfgPath) : null;
         try {
@@ -500,8 +510,8 @@ public class MessageServiceTest {
                     "随便", itemsJson, null, null);
 
             verify(pythonClient).generateImage(any(ImageGenerateRequest.class));
-            verify(qqWs, never()).sendImage(anyString(), anyString(), anyString());
-            verify(qqWs).sendReply(eq("1875552542"), eq("看这个"));
+            verify(qqWs, never()).sendImage(anyString(), anyString(), anyString(), anyString());
+            verify(qqWs).sendReply(eq("2387511709"), eq("1875552542"), eq("看这个"));
         } finally {
             if (backup != null) java.nio.file.Files.write(cfgPath, backup);
         }
@@ -512,7 +522,7 @@ public class MessageServiceTest {
      */
     @Test
     public void testDispatchReplyNoImageConfigSendsTextOnly() throws Exception {
-        java.nio.file.Path cfgPath = java.nio.file.Path.of("./data/system_config.json");
+        java.nio.file.Path cfgPath = configPath;
         boolean existed = java.nio.file.Files.exists(cfgPath);
         byte[] backup = existed ? java.nio.file.Files.readAllBytes(cfgPath) : null;
         try {
@@ -534,8 +544,8 @@ public class MessageServiceTest {
                     "随便", itemsJson, null, null);
 
             verify(pythonClient, never()).generateImage(any(ImageGenerateRequest.class));
-            verify(qqWs, never()).sendImage(anyString(), anyString(), anyString());
-            verify(qqWs).sendReply(eq("1875552542"), eq("看看这个"));
+            verify(qqWs, never()).sendImage(anyString(), anyString(), anyString(), anyString());
+            verify(qqWs).sendReply(eq("2387511709"), eq("1875552542"), eq("看看这个"));
         } finally {
             if (backup != null) java.nio.file.Files.write(cfgPath, backup);
         }

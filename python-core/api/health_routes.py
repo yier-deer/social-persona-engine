@@ -38,14 +38,16 @@ async def health():
     memory_ok = memory_service._memory is not None
 
     # LLM 使用 api_config 每次传入，无法在此做实际调用
-    llm_ok = True
+    llm_ok = None
 
-    status = "ok" if memory_ok else "degraded"
+    status = "degraded" if memory_service.last_error else "ok"
     uptime = int(time.time() - _start_time)
 
     return {
         "status": status,
         "llm_connected": llm_ok,
         "memory_connected": memory_ok,
+        "llm_status": "unverified",
+        "memory_status": "degraded" if memory_service.last_error else "ready" if memory_ok else "not_initialized",
         "uptime_seconds": uptime
     }
