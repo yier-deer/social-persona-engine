@@ -77,7 +77,10 @@ public interface EventMapper extends BaseMapper<DailyEvent> {
                      @Param("from") String from,
                      @Param("to") String to);
 
-    /** 查今天所有未失效事件（前端展示用） */
+    @Select("SELECT COUNT(*) FROM daily_events WHERE persona_id = #{personaId} AND event_date = #{today}")
+    int countAllForDay(@Param("personaId") String personaId, @Param("today") String today);
+
+    /** 查今天仍在事件线上的活跃事件（历史存在性由 countAllForDay 提供）。 */
     List<DailyEvent> findAllToday(@Param("personaId") String personaId,
                                   @Param("today") String today);
 }

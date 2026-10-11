@@ -1,11 +1,12 @@
 import { useState, useEffect } from 'react'
 import TestConnectionModal from './TestConnectionModal'
 import { useLocale } from '../LocaleContext'
+import { requestJson } from '../api'
 
-export default function ProviderSelector({ onSave, onClose, initialProvider, initialKey, initialModel, initialUrl, endpoint = '/api/config/key', filterType }) {
+export default function ProviderSelector({ onSave, onClose, onSkip, initialProvider, initialKey, initialModel, initialUrl, hasKey = false, endpoint = '/api/config/key', filterType }) {
   const { t } = useLocale()
   const [providers, setProviders] = useState([])
-  const [selected, setSelected] = useState(initialProvider || 'deepseek')
+  const [selected, setSelected] = useState(initialProvider || '')
   const [apiKey, setApiKey] = useState(initialKey || '')
   const [model, setModel] = useState(initialModel || '')
   const [baseUrl, setBaseUrl] = useState(initialUrl || '')
@@ -15,8 +16,12 @@ export default function ProviderSelector({ onSave, onClose, initialProvider, ini
   const [refreshError, setRefreshError] = useState(false)
   const [showTest, setShowTest] = useState(false)
   const [saving, setSaving] = useState(false)
+  const [saveError, setSaveError] = useState('')
+  const [loadingProviders, setLoadingProviders] = useState(true)
 
   const currentProvider = providers.find(p => p.id === selected) || {}
+  const canKeepKey = hasKey && selected === initialProvider
+  const canSave = !!selected && !loadingProviders && (apiKey.trim() || canKeepKey) && model.trim() && baseUrl.trim()
 
   const localized = (provider, field) => {
     const key = `providerSelector.${field}_${provider.id}`
@@ -25,39 +30,48 @@ export default function ProviderSelector({ onSave, onClose, initialProvider, ini
   }
 
   useEffect(() => {
+    let cancelled = false
     const fetchUrl = filterType ? `/api/config/providers?type=${filterType}` : '/api/config/providers'
-    fetch(fetchUrl)
-      .then(r => r.json())
+    setLoadingProviders(true)
+    requestJson(fetchUrl)
       .then(data => {
+        if (cancelled) return
         const list = Array.isArray(data) ? data : []
         setProviders(list)
-        // 自动选第一个模型的默认值
-        const sel = list.find(p => p.id === (initialProvider || (list[0]?.id ?? 'deepseek')))
-        if (!initialModel && sel?.models?.[0]) setModel(sel.models[0].id)
-        if (!initialUrl && sel?.default_url) setBaseUrl(sel.default_url)
+        const sel = list.find(p => p.id === initialProvider) || list[0]
+        setSelected(sel?.id || '')
+        const available = sel?.models || []
+        setModels(initialModel && !available.some(m => m.id === initialModel)
+          ? [{ id: initialModel, name: initialModel }, ...available] : available)
+        setModel(initialModel || available[0]?.id || '')
+        setBaseUrl(initialUrl || sel?.default_url || '')
+        if (!sel) setSaveError(t('providerSelector.loadFailed'))
       })
-  }, [filterType])
+      .catch(() => { if (!cancelled) setSaveError(t('providerSelector.loadFailed')) })
+      .finally(() => { if (!cancelled) setLoadingProviders(false) })
+    return () => { cancelled = true }
+  }, [filterType, initialProvider, initialModel, initialUrl])
 
-  // 切换 Provider 时自动切模型和 URL
-  useEffect(() => {
-    const sel = providers.find(p => p.id === selected)
-    if (sel && !initialModel) {
-      setModels(sel.models || [])
-      if (sel.models?.length > 0) setModel(sel.models[0].id)
-      if (sel.default_url && !initialUrl) setBaseUrl(sel.default_url)
-    }
-  }, [selected, providers])
+  const selectProvider = (provider) => {
+    if (provider.id === selected) return
+    setSelected(provider.id)
+    setModels(provider.models || [])
+    setModel(provider.models?.[0]?.id || '')
+    setBaseUrl(provider.default_url || '')
+    setApiKey('')
+    setRefreshMsg('')
+    setSaveError('')
+  }
 
   const refreshModels = async () => {
     if (!apiKey.trim()) return setRefreshMsg(t('providerSelector.enterKeyFirst'))
     setRefreshing(true)
     setRefreshMsg('')
     try {
-      const r = await fetch(`/api/config/providers/${selected}/refresh-models`, {
+      const data = await requestJson(`/api/config/providers/${selected}/refresh-models`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ apiKey, baseUrl }),
       })
-      const data = await r.json()
       if (data.success) {
         setModels(data.models)
         setRefreshMsg(t('providerSelector.modelsFetched', { count: data.models.length }))
@@ -76,13 +90,22 @@ export default function ProviderSelector({ onSave, onClose, initialProvider, ini
   }
 
   const handleSave = async () => {
+    if (!canSave || saving) return false
     setSaving(true)
-    await fetch(endpoint, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ provider: selected, apiKey, baseUrl, model }),
-    })
-    onSave?.({ provider: selected, apiKey, model, baseUrl })
-    setSaving(false)
+    setSaveError('')
+    try {
+      await requestJson(endpoint, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ provider: selected, apiKey: apiKey.trim(), baseUrl: baseUrl.trim(), model: model.trim() }),
+      })
+      onSave?.({ provider: selected, model: model.trim(), baseUrl: baseUrl.trim() })
+      return true
+    } catch (error) {
+      setSaveError(error.message || t('providerSelector.networkError'))
+      return false
+    } finally {
+      setSaving(false)
+    }
   }
 
   return (
@@ -102,12 +125,13 @@ export default function ProviderSelector({ onSave, onClose, initialProvider, ini
           </button>
 
           <h2 className="font-serif text-xl font-semibold text-jade-700 mb-6">{t('providerSelector.selectProvider')}</h2>
+          {saveError && <p role="alert" className="text-sm text-red-600 mb-4">{saveError}</p>}
 
           {/* Provider 列表 */}
           <div className="grid grid-cols-2 gap-3 mb-6">
             {providers.map(p => (
               <div key={p.id}
-                onClick={() => setSelected(p.id)}
+                onClick={() => selectProvider(p)}
                 className={`cursor-pointer rounded-2xl p-4 transition-all duration-300 ${
                   selected === p.id
                     ? 'ring-2 ring-jade-400/40 shadow-lg'
@@ -181,10 +205,11 @@ export default function ProviderSelector({ onSave, onClose, initialProvider, ini
               </div>
 
               <div>
-                <label className="block text-xs font-medium text-ink-soft mb-1.5">API Key</label>
-                <input type="password" value={apiKey} onChange={e => setApiKey(e.target.value)}
+                <label htmlFor="provider-api-key" className="block text-xs font-medium text-ink-soft mb-1.5">API Key</label>
+                <input id="provider-api-key" type="password" autoComplete="off" value={apiKey} onChange={e => setApiKey(e.target.value)}
                   placeholder={currentProvider.id === 'anthropic' ? 'sk-ant-...' : 'sk-...'}
                   className="w-full rounded-xl px-4 py-3 text-sm bg-white/60 border border-jade-600/10 focus:outline-none focus:border-jade-400/40" />
+                {canKeepKey && <p className="text-[11px] text-ink-soft/60 mt-1">{t('providerSelector.keepKey')}</p>}
               </div>
 
               <div>
@@ -201,11 +226,12 @@ export default function ProviderSelector({ onSave, onClose, initialProvider, ini
                   className={`px-5 py-2.5 rounded-full text-sm font-medium bg-indigo-50 text-indigo-600 hover:bg-indigo-100 transition-all ${(!apiKey.trim() || !model.trim()) ? 'opacity-40 pointer-events-none' : ''}`}>
                   {t('providerSelector.testConnection')}
                 </button>
-                <button onClick={handleSave} disabled={!apiKey.trim() || !model.trim() || saving}
-                  className={`btn-jade text-sm flex-1 ${(!apiKey.trim() || !model.trim() || saving) ? 'opacity-40 pointer-events-none' : ''}`}>
+                <button onClick={handleSave} disabled={!canSave || saving}
+                  className={`btn-jade text-sm flex-1 ${(!canSave || saving) ? 'opacity-40 pointer-events-none' : ''}`}>
                   {saving ? t('providerSelector.saving') : t('providerSelector.save')}
                 </button>
               </div>
+              {onSkip && <button onClick={onSkip} className="w-full text-sm text-ink-soft/70 py-2">{t('common.skip')}</button>}
             </div>
           )}
         </div>
@@ -215,9 +241,9 @@ export default function ProviderSelector({ onSave, onClose, initialProvider, ini
         <TestConnectionModal
           provider={selected} apiKey={apiKey}
           baseUrl={baseUrl || currentProvider.default_url || ''}
-          model={model} type="chat"
+          model={model} type={filterType === 'image' ? 'image' : 'chat'}
           onClose={() => setShowTest(false)}
-          onConnected={() => { handleSave(); setShowTest(false) }} />
+          onConnected={async () => { if (await handleSave()) setShowTest(false) }} />
       )}
     </>
   )

@@ -24,6 +24,9 @@ python:
 
 app:
   image-dir: target/test-generated_images
+  config-file: target/test-system_config.json
+  automation:
+    enabled: false
 
 logging:
   level:

@@ -14,7 +14,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.cache.CacheManager;
 import org.springframework.cache.annotation.CacheEvict;
-import org.springframework.cache.annotation.Cacheable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -48,6 +47,9 @@ public class PersonaService {
 
     @Value("${app.image-dir:data/generated_images}")
     private String imageBaseDir;
+
+    @Value("${app.config-file:./data/system_config.json}")
+    private String configFilePath = "./data/system_config.json";
 
     /**
      * 启动时清理孤儿图片目录（DB中已不存在的persona对应的目录）
@@ -93,7 +95,6 @@ public class PersonaService {
 
     // ==================== 查询 ====================
 
-    @Cacheable(value = "persona", key = "#id")
     public Persona getById(String id) {
         return personaMapper.selectById(id);
     }
@@ -113,7 +114,6 @@ public class PersonaService {
         personaMapper.updateById(persona);
     }
 
-    @Cacheable(value = "persona", key = "'qq:' + #aiQq")
     public Persona findByAiQQ(String aiQq) {
         LambdaQueryWrapper<Persona> wrapper = new LambdaQueryWrapper<>();
         wrapper.eq(Persona::getAiQq, aiQq).ne(Persona::getStatus, "archived");
@@ -132,9 +132,15 @@ public class PersonaService {
         return personaMapper.selectList(wrapper);
     }
 
+    public List<Persona> listEnabled() {
+        return personaMapper.selectList(new LambdaQueryWrapper<Persona>()
+                .in(Persona::getStatus, List.of("active", "sleeping")));
+    }
+
     // ==================== 创建 ====================
 
     @Transactional
+    @CacheEvict(value = "persona", allEntries = true)
     public Persona createPersona(PersonaConfigDTO config, String rawApiKey,
                                  String masterKey, String lifeArchiveJson) {
         String personaId = UUID.randomUUID().toString();
@@ -158,9 +164,8 @@ public class PersonaService {
         persona.setImageEnabled(config.getImageEnabled() != null ? config.getImageEnabled() : 1);
 
         try {
-            String safeKey = ensureValidKey(masterKey);
-            String encrypted = rawApiKey != null && !rawApiKey.isEmpty()
-                    ? AESGCMUtil.encrypt(rawApiKey, safeKey)
+            String encrypted = rawApiKey != null && !rawApiKey.isEmpty() && masterKey != null && !masterKey.isBlank()
+                    ? AESGCMUtil.encrypt(rawApiKey, ensureValidKey(masterKey))
                     : "";
             persona.setApiKeyEncrypted(encrypted);
         } catch (Exception e) {
@@ -176,8 +181,8 @@ public class PersonaService {
                 ? config.getCharacterCurrentContext()
                 : buildPhaseContext(config.getName(), config.getRelationshipPhase())
         );
-        persona.setAiQq(config.getAiQq());
-        persona.setOwnerQq(config.getOwnerQq());
+        persona.setAiQq(trimAccount(config.getAiQq()));
+        persona.setOwnerQq(resolveOwnerQq(config.getOwnerQq()));
         persona.setRelationshipPhase(config.getRelationshipPhase());
         persona.setMatchmakerRawData(config.getMatchmakerRawData());
         persona.setStatus("active");
@@ -189,6 +194,7 @@ public class PersonaService {
             persona.setLifeStage(inferLifeStage(persona.getCharacterCurrentContext()));
         }
 
+        clearPreviousBotBinding(personaId, persona.getAiQq());
         personaMapper.insert(persona);
 
         ensureImageDir(persona);
@@ -205,8 +211,11 @@ public class PersonaService {
 
     // ==================== 更新 ====================
 
-    @CacheEvict(value = "persona", key = "#id")
+    @Transactional
+    @CacheEvict(value = "persona", allEntries = true)
     public void update(String id, PersonaConfigDTO config) {
+        if (getById(id) == null) throw new IllegalArgumentException("Persona 不存在: " + id);
+        if (config.getAiQq() != null) clearPreviousBotBinding(id, trimAccount(config.getAiQq()));
         LambdaUpdateWrapper<Persona> wrapper = new LambdaUpdateWrapper<>();
         wrapper.eq(Persona::getId, id)
                .set(config.getName() != null, Persona::getName, config.getName())
@@ -229,61 +238,51 @@ public class PersonaService {
                .set(config.getCharacterCurrentContext() != null, Persona::getCharacterCurrentContext, config.getCharacterCurrentContext())
                .set(config.getRelationshipPhase() != null, Persona::getRelationshipPhase, config.getRelationshipPhase())
                .set(config.getMatchmakerRawData() != null, Persona::getMatchmakerRawData, config.getMatchmakerRawData())
-               .set(config.getAiQq() != null, Persona::getAiQq, config.getAiQq())
-               .set(config.getOwnerQq() != null, Persona::getOwnerQq, config.getOwnerQq())
+               .set(config.getAiQq() != null, Persona::getAiQq, trimAccount(config.getAiQq()))
+               .set(config.getOwnerQq() != null, Persona::getOwnerQq, resolveOwnerQq(config.getOwnerQq()))
                .set(config.getLifeStage() != null, Persona::getLifeStage, config.getLifeStage())
                .set(config.getLifeStageDetail() != null, Persona::getLifeStageDetail, config.getLifeStageDetail())
                .set(config.getCurrentLocation() != null, Persona::getCurrentLocation, config.getCurrentLocation());
         personaMapper.update(wrapper);
     }
 
-    @CacheEvict(value = "persona", key = "#id")
+    @CacheEvict(value = "persona", allEntries = true)
     public void archive(String id) {
         LambdaUpdateWrapper<Persona> wrapper = new LambdaUpdateWrapper<>();
         wrapper.eq(Persona::getId, id).set(Persona::getStatus, "archived");
         personaMapper.update(wrapper);
     }
 
-    @CacheEvict(value = "persona", key = "#id")
+    @CacheEvict(value = "persona", allEntries = true)
     public String toggle(String id) {
         Persona persona = getById(id);
         if (persona == null) throw new RuntimeException("Persona 不存在: " + id);
-        String newStatus = "active".equals(persona.getStatus()) ? "paused" : "active";
+        if ("archived".equals(persona.getStatus())) throw new IllegalStateException("已归档的角色无法切换状态");
+        String newStatus = "paused".equals(persona.getStatus()) ? "active" : "paused";
         LambdaUpdateWrapper<Persona> wrapper = new LambdaUpdateWrapper<>();
         wrapper.eq(Persona::getId, id).set(Persona::getStatus, newStatus);
         personaMapper.update(wrapper);
         return newStatus;
     }
 
+    @Transactional
+    @CacheEvict(value = "persona", allEntries = true)
     public void bindChannel(String id, String type, String account) {
         Persona persona = getById(id);
-        if (persona == null) return;
+        if (persona == null) throw new IllegalArgumentException("Persona 不存在: " + id);
+        if (!"qq".equals(type) && !"owner-qq".equals(type)) throw new IllegalArgumentException("不支持的聊天渠道");
+        account = trimAccount(account);
 
         String oldAiQq = persona.getAiQq();
 
         LambdaUpdateWrapper<Persona> wrapper = new LambdaUpdateWrapper<>();
         wrapper.eq(Persona::getId, id);
         if ("qq".equals(type)) {
-            // 如果新QQ已被其他Persona占用，清掉那个人的绑定
-            if (account != null && !account.isEmpty()) {
-                Persona existing = personaMapper.selectOne(
-                    new LambdaQueryWrapper<Persona>()
-                        .eq(Persona::getAiQq, account)
-                        .ne(Persona::getId, id)
-                );
-                if (existing != null) {
-                    log.info("QQ号冲突: {} 原属于 {}, 将解绑旧Persona",
-                            account, existing.getId());
-                    existing.setAiQq(null);
-                    personaMapper.updateById(existing);
-                    evictCache(existing.getId());
-                    evictCache("qq:" + account);
-                }
-            }
+            clearPreviousBotBinding(id, account);
             wrapper.set(Persona::getAiQq, account);
             // 自动设置 owner_qq：如果当前Persona没有owner_qq，从其他活跃Persona继承
             if (persona.getOwnerQq() == null || persona.getOwnerQq().isEmpty()) {
-                String inheritedOwner = findAnyOwnerQq(id);
+                String inheritedOwner = resolveOwnerQq(null);
                 if (inheritedOwner != null && !inheritedOwner.isEmpty()) {
                     wrapper.set(Persona::getOwnerQq, inheritedOwner);
                     log.info("自动设置 owner_qq: persona={}, owner={}", id, inheritedOwner);
@@ -302,6 +301,24 @@ public class PersonaService {
             evictCache("qq:" + account);
         }
         evictCache(id);
+    }
+
+    private void clearPreviousBotBinding(String personaId, String aiQq) {
+        if (aiQq == null || aiQq.isBlank()) return;
+        personaMapper.update(new LambdaUpdateWrapper<Persona>()
+                .eq(Persona::getAiQq, aiQq).ne(Persona::getId, personaId)
+                .set(Persona::getAiQq, null));
+    }
+
+    private String trimAccount(String account) {
+        return account == null || account.isBlank() ? null : account.trim();
+    }
+
+    private String resolveOwnerQq(String explicitOwner) {
+        String owner = trimAccount(explicitOwner);
+        if (owner != null) return owner;
+        Object globalOwner = loadSystemConfig().get("qq");
+        return trimAccount(globalOwner == null ? null : globalOwner.toString());
     }
 
     /** 手动清除 Redis 缓存中的指定键 */
@@ -351,7 +368,7 @@ public class PersonaService {
     public void saveMasterKeyHash(String masterKey) {
         try {
             String safeKey = ensureValidKey(masterKey);
-            Path path = Path.of("./data/system_config.json");
+            Path path = Path.of(configFilePath);
             Map<String, Object> cfg;
             if (Files.exists(path)) {
                 cfg = objectMapper.readValue(Files.readString(path),
@@ -367,56 +384,17 @@ public class PersonaService {
     }
 
     public ApiConfigDTO decryptApiConfig(String personaId) {
-        Persona persona = getById(personaId);
-        if (persona == null || persona.getApiKeyEncrypted() == null) return null;
-        Map<String, Object> cfg = loadSystemConfig();
-
-        // ★ 如果 apiKeyEncrypted 为空（createFromJson 没设），直接走兜底
-        if (!persona.getApiKeyEncrypted().isEmpty()) {
-            String masterKey = loadMasterKeyFromConfig();
-            if (masterKey != null) {
-                try {
-                    String plainApiKey = AESGCMUtil.decrypt(persona.getApiKeyEncrypted(), masterKey);
-                    return new ApiConfigDTO(
-                            (String) cfg.getOrDefault("provider", "deepseek"),
-                            plainApiKey,
-                            (String) cfg.getOrDefault("baseUrl", "https://api.deepseek.com/v1"),
-                            (String) cfg.getOrDefault("model", "deepseek-chat")
-                    );
-                } catch (Exception e) {
-                    log.warn("AES 解密失败(可能 masterKey 不匹配): persona={}", personaId);
-                    return null;
-                }
-            }
-        }
-
-        // ★ 兜底：从 system_config.json 读取 Base64 API Key 作为明文
-        String fallbackKey = loadRawApiKeyFromConfig();
-        if (fallbackKey != null && !fallbackKey.isEmpty()) {
-            log.warn("使用 system_config 的 API Key 作为兜底: persona={}", personaId);
-            try {
-                saveMasterKeyHash(fallbackKey);
-                String safeKey = ensureValidKey(fallbackKey);
-                String reEncrypted = AESGCMUtil.encrypt(fallbackKey, safeKey);
-                LambdaUpdateWrapper<Persona> wrapper = new LambdaUpdateWrapper<>();
-                wrapper.eq(Persona::getId, personaId)
-                       .set(Persona::getApiKeyEncrypted, reEncrypted);
-                personaMapper.update(wrapper);
-                log.info("persona api_key 已重新加密: persona={}", personaId);
-            } catch (Exception e) { log.warn("persona api_key重加密失败: persona={}", personaId, e); }
-            return new ApiConfigDTO(
-                    (String) cfg.getOrDefault("provider", "deepseek"),
-                    fallbackKey,
-                    (String) cfg.getOrDefault("baseUrl", "https://api.deepseek.com/v1"),
-                    (String) cfg.getOrDefault("model", "deepseek-chat")
-            );
-        }
-        return null;
+        if (getById(personaId) == null) return null;
+        Map<String, Object> config = loadGlobalApiConfig();
+        String key = Objects.toString(config.get("api_key"), "");
+        if (key.isBlank()) return null;
+        return new ApiConfigDTO(Objects.toString(config.get("provider"), ""), key,
+                Objects.toString(config.get("base_url"), ""), Objects.toString(config.get("model"), ""));
     }
 
     private String loadMasterKeyFromConfig() {
         try {
-            Path path = Path.of("./data/system_config.json");
+            Path path = Path.of(configFilePath);
             if (!Files.exists(path)) return null;
             Map<String, Object> cfg = objectMapper.readValue(Files.readString(path),
                     new TypeReference<Map<String, Object>>() {});
@@ -429,7 +407,7 @@ public class PersonaService {
     /** 从 system_config.json 读取 Base64 编码的 apiKeyEncrypted 并解码为明文 */
     private String loadRawApiKeyFromConfig() {
         try {
-            Path path = Path.of("./data/system_config.json");
+            Path path = Path.of(configFilePath);
             if (!Files.exists(path)) return null;
             Map<String, Object> cfg = objectMapper.readValue(Files.readString(path),
                     new TypeReference<Map<String, Object>>() {});
@@ -443,7 +421,7 @@ public class PersonaService {
 
     private Map<String, Object> loadSystemConfig() {
         try {
-            String json = Files.readString(Path.of("./data/system_config.json"));
+            String json = Files.readString(Path.of(configFilePath));
             return objectMapper.readValue(json, new TypeReference<Map<String, Object>>() {});
         } catch (Exception e) {
             Map<String, Object> defaults = new LinkedHashMap<>();
@@ -458,7 +436,7 @@ public class PersonaService {
     @SuppressWarnings("unchecked")
     public Map<String, Object> loadImageApiConfig() {
         try {
-            Path path = Path.of("./data/system_config.json");
+            Path path = Path.of(configFilePath);
             if (!Files.exists(path)) return null;
             Map<String, Object> cfg = loadSystemConfig();
             String imageProvider = (String) cfg.getOrDefault("imageProvider", "");
@@ -570,6 +548,7 @@ public class PersonaService {
     }
 
     @Transactional
+    @CacheEvict(value = "persona", allEntries = true)
     public String createFromJson(String json) {
         try {
             @SuppressWarnings("unchecked")
@@ -597,8 +576,8 @@ public class PersonaService {
             persona.setBirthday(strOrNull(data, "birthday"));
             persona.setCharacterCurrentContext(strOrNull(data, "characterCurrentContext"));
             persona.setSampleChatsJson(strOrNull(data, "sampleChatsJson"));
-            persona.setAiQq(strOrNull(data, "aiQq"));
-            persona.setOwnerQq(strOrNull(data, "ownerQq"));
+            persona.setAiQq(trimAccount(strOrNull(data, "aiQq")));
+            persona.setOwnerQq(resolveOwnerQq(strOrNull(data, "ownerQq")));
             persona.setRelationshipPhase(strOrNull(data, "relationshipPhase"));
             persona.setMatchmakerRawData(strOrNull(data, "matchmakerRawData"));
             persona.setStatus("active");
@@ -611,6 +590,7 @@ public class PersonaService {
                 persona.setLifeStage(inferLifeStage(persona.getCharacterCurrentContext()));
             }
 
+            clearPreviousBotBinding(personaId, persona.getAiQq());
             personaMapper.insert(persona);
             ensureImageDir(persona);
 
@@ -629,6 +609,7 @@ public class PersonaService {
     }
 
     @Transactional
+    @CacheEvict(value = "persona", allEntries = true)
     public String importFromJson(String json) {
         try {
             @SuppressWarnings("unchecked")
@@ -654,11 +635,12 @@ public class PersonaService {
             persona.setBirthday(strOrNull(data, "birthday"));
             persona.setCharacterCurrentContext(strOrNull(data, "characterCurrentContext"));
             persona.setSampleChatsJson(strOrNull(data, "sampleChatsJson"));
-            persona.setAiQq(strOrNull(data, "aiQq"));
-            persona.setOwnerQq(strOrNull(data, "ownerQq"));
+            persona.setAiQq(trimAccount(strOrNull(data, "aiQq")));
+            persona.setOwnerQq(resolveOwnerQq(strOrNull(data, "ownerQq")));
             persona.setRelationshipPhase(strOrNull(data, "relationshipPhase"));
             persona.setStatus("paused");
             persona.setApiKeyEncrypted("");
+            clearPreviousBotBinding(personaId, persona.getAiQq());
             personaMapper.insert(persona);
             ensureImageDir(persona);
             return personaId;
@@ -720,7 +702,7 @@ public class PersonaService {
     private static String ensureValidKey(String key) {
         try {
             byte[] decoded = java.util.Base64.getDecoder().decode(key);
-            if (decoded.length >= 32) return key;
+            if (decoded.length == 32) return key;
         } catch (Exception e) { log.debug("Base64 key检测失败, 将使用SHA-256兜底", e); }
         // 兜底：用 SHA-256 把任意字符串变成 32 字节的 Base64 key
         try {

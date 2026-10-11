@@ -15,7 +15,10 @@ import org.springframework.stereotype.Component;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 
 @Component
@@ -29,6 +32,7 @@ public class QQWebSocketHandler implements ApplicationContextAware {
     private final PersonaService personaService;
 
     private static final ConcurrentHashMap<String, Session> napCatSessions = new ConcurrentHashMap<>();
+    private static final Set<String> pendingEventGeneration = ConcurrentHashMap.newKeySet();
 
     public QQWebSocketHandler(PersonaService personaService) {
         this.personaService = personaService;
@@ -95,6 +99,11 @@ public class QQWebSocketHandler implements ApplicationContextAware {
                 return;
             }
 
+            if (!"active".equals(persona.getStatus())) {
+                log.debug("QQ 消息暂不处理: persona={}, status={}", persona.getId(), persona.getStatus());
+                return;
+            }
+
             if (persona.getOwnerQq() == null || persona.getOwnerQq().isEmpty()) {
                 log.debug("AI 未配置 owner_qq: persona={}", persona.getId());
                 return;
@@ -117,10 +126,15 @@ public class QQWebSocketHandler implements ApplicationContextAware {
 
     private void handleMetaEvent(JsonNode json, Session session) {
         String metaType = json.path("meta_event_type").asText();
-        if ("heartbeat".equals(metaType)) {
-            log.debug("OneBot 心跳: {}", session.getId());
-            String selfId = json.path("status").path("self_id").asText();
+        if ("heartbeat".equals(metaType) || "lifecycle".equals(metaType)) {
+            String selfId = json.path("self_id").asText();
+            // Compatibility for older adapters; OneBot V11 identifies the bot at the top level.
+            if (selfId.isEmpty()) selfId = json.path("status").path("self_id").asText();
             if (!selfId.isEmpty()) {
+                if (json.path("status").has("online") && !json.path("status").path("online").asBoolean()) {
+                    napCatSessions.remove(selfId, session);
+                    return;
+                }
                 napCatSessions.put(selfId, session);
                 triggerLazyEventGeneration(selfId);
             }
@@ -131,44 +145,63 @@ public class QQWebSocketHandler implements ApplicationContextAware {
      * 心跳时触发今日事件懒加载 —— 异步执行，不阻塞 WebSocket 线程
      */
     private void triggerLazyEventGeneration(String selfId) {
-        try {
-            Persona persona = personaService.findByAiQQ(selfId);
-            if (persona == null) return;
-            if (applicationContext != null) {
-                EventTriggerScheduler scheduler =
-                        applicationContext.getBean(EventTriggerScheduler.class);
-                scheduler.lazyGenerateTodayEventsIfNeeded(persona.getId());
+        ApplicationContext context = applicationContext;
+        if (context == null || !pendingEventGeneration.add(selfId)) return;
+        CompletableFuture.runAsync(() -> {
+            try {
+                Persona persona = personaService.findByAiQQ(selfId);
+                if (persona == null || !("active".equals(persona.getStatus()) || "sleeping".equals(persona.getStatus()))) return;
+                context.getBean(EventTriggerScheduler.class).lazyGenerateTodayEventsIfNeeded(persona.getId());
+            } catch (Exception e) {
+                log.debug("懒加载触发失败: bot={}, type={}", selfId, e.getClass().getSimpleName());
+            } finally {
+                pendingEventGeneration.remove(selfId);
             }
-        } catch (Exception e) {
-            log.debug("懒加载触发异常(正常降级): {}", e.getMessage());
-        }
+        });
     }
 
+    public List<String> getConnectedBotIds() {
+        return napCatSessions.entrySet().stream()
+                .filter(entry -> entry.getValue().isOpen())
+                .map(Map.Entry::getKey).sorted().toList();
+    }
+
+    /** Compatibility for callers that can operate only when exactly one bot is connected. */
+    @Deprecated
     public void sendReply(String userId, String message) {
-        sendWithRetry(userId, message, 0);
+        sendReply(singleConnectedBot(), userId, message);
     }
 
+    public void sendReply(String aiQq, String userId, String message) {
+        if (aiQq == null || aiQq.isBlank() || userId == null || userId.isBlank()) {
+            throw new IllegalStateException("角色尚未绑定机器人 QQ 和主人 QQ");
+        }
+        sendWithRetry(aiQq, userId, message, 0);
+    }
+
+    @Deprecated
     public void sendImage(String userId, String imagePath, String caption) {
-        String absPath = Path.of(imagePath).toAbsolutePath().toString().replace("\\", "/");
-        String cqCode = "[CQ:image,file=" + absPath + "]";
-        String message = (caption != null && !caption.isEmpty()) ? caption + " " + cqCode : cqCode;
-        sendReply(userId, message);
+        sendImage(singleConnectedBot(), userId, imagePath, caption);
     }
 
-    private void sendWithRetry(String userId, String message, int attempt) {
-        Session targetSession = null;
-        for (Map.Entry<String, Session> entry : napCatSessions.entrySet()) {
-            if (entry.getValue().isOpen()) {
-                targetSession = entry.getValue();
-                break;
-            }
-        }
+    public void sendImage(String aiQq, String userId, String imagePath, String caption) {
+        String fileUri = Path.of(imagePath).toAbsolutePath().toUri().toString();
+        String cqCode = "[CQ:image,file=" + fileUri + "]";
+        String message = (caption != null && !caption.isEmpty()) ? caption + " " + cqCode : cqCode;
+        sendReply(aiQq, userId, message);
+    }
 
-        if (targetSession == null) {
-            log.warn("NapCat 未连接，无法发送: user={}", userId);
-            return;
-        }
+    private String singleConnectedBot() {
+        List<String> bots = getConnectedBotIds();
+        if (bots.size() != 1) throw new IllegalStateException("发送消息必须指定已连接的机器人 QQ");
+        return bots.get(0);
+    }
 
+    private void sendWithRetry(String aiQq, String userId, String message, int attempt) {
+        Session targetSession = napCatSessions.get(aiQq);
+        if (targetSession == null || !targetSession.isOpen()) {
+            throw new IllegalStateException("绑定的机器人 QQ 尚未连接 NapCat");
+        }
         try {
             Map<String, Object> action = Map.of(
                     "action", "send_private_msg",
@@ -178,13 +211,17 @@ public class QQWebSocketHandler implements ApplicationContextAware {
             synchronized (targetSession) {
                 targetSession.getBasicRemote().sendText(json);
             }
-        } catch (IOException e) {
+        } catch (IOException | IllegalStateException e) {
             if (attempt < 2) {
-                log.warn("QQ发送失败(重试 {}/2): user={}, error={}", attempt + 1, userId, e.getMessage());
-                try { Thread.sleep(500 * (attempt + 1)); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
-                sendWithRetry(userId, message, attempt + 1);
+                try {
+                    Thread.sleep(500L * (attempt + 1));
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException("QQ 发送已中断");
+                }
+                sendWithRetry(aiQq, userId, message, attempt + 1);
             } else {
-                log.error("QQ发送失败(已重试2次): user={}, error={}", userId, e.getMessage());
+                throw new IllegalStateException("QQ 消息发送失败，请检查 NapCat 连接");
             }
         }
     }

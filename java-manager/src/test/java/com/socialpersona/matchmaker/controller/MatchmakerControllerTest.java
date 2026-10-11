@@ -16,6 +16,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.*;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.web.server.ResponseStatusException;
+import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 
 import java.util.*;
 
@@ -167,16 +169,15 @@ public class MatchmakerControllerTest {
     // ==================== chat 7 阶段完整流转 ====================
 
     @Test
-    public void testChatSevenStagesFullFlow() {
+    public void testChatFullStageFlow() {
         String[] stages = {
                 "basic_profile", "style_anchor", "boundary_probe",
-                "attachment_explore", "system_detail", "capability_config",
-                "sample_confirm"
+                "attachment_explore", "system_detail", "sample_confirm"
         };
 
         // 构建 7 个 Python 响应：前 6 个推进，第 7 个完成
         List<MatchmakerResponse> pyResponses = new ArrayList<>();
-        for (int i = 0; i < 6; i++) {
+        for (int i = 0; i < stages.length - 1; i++) {
             MatchmakerResponse r = new MatchmakerResponse();
             r.setReply("第 " + (i + 1) + " 阶段回复");
             r.setNextStage(stages[i + 1]);
@@ -195,38 +196,41 @@ public class MatchmakerControllerTest {
         // 模拟 sessionService：每次返回当前阶段
         when(sessionService.getSession("session-1")).thenReturn(testSession);
         doNothing().when(sessionService).appendHistory(anyString(), anyString(), anyString());
-        doNothing().when(sessionService).advanceStage(anyString(), anyString(), anyMap());
+        doAnswer(inv -> {
+            testSession.setCurrentStage(inv.getArgument(1));
+            return null;
+        }).when(sessionService).advanceStage(anyString(), anyString(), anyMap());
 
         // Python 链式返回
         when(pythonClient.matchmakerChat(any()))
                 .thenReturn(pyResponses.get(0), pyResponses.get(1), pyResponses.get(2),
-                        pyResponses.get(3), pyResponses.get(4), pyResponses.get(5), pyResponses.get(6));
+                        pyResponses.get(3), pyResponses.get(4), pyResponses.get(5));
 
         MatchmakerChatRequest req = new MatchmakerChatRequest();
         req.setSessionId("session-1");
 
         // 执行 7 轮
-        for (int i = 0; i < 7; i++) {
+        for (int i = 0; i < stages.length; i++) {
             req.setUserMessage("第 " + (i + 1) + " 轮回复");
             MatchmakerChatResponse resp = controller.chat(req);
 
-            assertEquals(stages[Math.min(i + 1, 6)], resp.getCurrentStage(),
-                    "第 " + (i + 1) + " 轮后 stage 应为 " + stages[Math.min(i + 1, 6)]);
+            assertEquals(stages[Math.min(i + 1, stages.length - 1)], resp.getCurrentStage(),
+                    "第 " + (i + 1) + " 轮后 stage 应为 " + stages[Math.min(i + 1, stages.length - 1)]);
 
-            if (i == 6) {
-                assertTrue(resp.isComplete(), "第 7 轮后应完成");
+            if (i == stages.length - 1) {
+                assertTrue(resp.isComplete(), "最后一轮后应完成");
             } else {
                 assertFalse(resp.isComplete(), "第 " + (i + 1) + " 轮不应完成");
             }
         }
 
-        verify(pythonClient, times(7)).matchmakerChat(any());
+        verify(pythonClient, times(stages.length)).matchmakerChat(any());
     }
 
     // ==================== chat Python 错误 ====================
 
     @Test
-    public void testChatPythonErrorReturnsFallbackReply() {
+    public void testChatPythonErrorReturnsBadGateway() {
         when(sessionService.getSession("session-1")).thenReturn(testSession);
         doNothing().when(sessionService).appendHistory(anyString(), anyString(), anyString());
         when(pythonClient.matchmakerChat(any())).thenThrow(new RuntimeException("Python 超时"));
@@ -235,10 +239,9 @@ public class MatchmakerControllerTest {
         req.setSessionId("session-1");
         req.setUserMessage("你好");
 
-        MatchmakerChatResponse resp = controller.chat(req);
-
-        assertTrue(resp.getReply().contains("抱歉"));
-        assertEquals("basic_profile", resp.getCurrentStage());
+        ResponseStatusException error = assertThrows(ResponseStatusException.class, () -> controller.chat(req));
+        assertEquals(502, error.getStatusCode().value());
+        verify(sessionService, never()).advanceStage(anyString(), anyString(), anyMap());
     }
 
     // ==================== confirm ====================
@@ -250,7 +253,7 @@ public class MatchmakerControllerTest {
         Persona testP = new Persona();
         testP.setId("persona-1");
         testP.setName("小奈");
-        when(personaService.createPersona(any(PersonaConfigDTO.class), anyString(), anyString(), anyString()))
+        when(personaService.createPersona(any(PersonaConfigDTO.class), anyString(), nullable(String.class), anyString()))
                 .thenReturn(testP);
         doNothing().when(sessionService).markCompleted(anyString(), anyString());
 
@@ -260,7 +263,8 @@ public class MatchmakerControllerTest {
         assertEquals("persona-1", resp.getPersonaId());
         assertTrue(resp.getReply().contains("创建好了"));
 
-        verify(personaService).createPersona(any(PersonaConfigDTO.class), anyString(), anyString(), anyString());
+        verify(personaService).createPersona(any(PersonaConfigDTO.class), anyString(), nullable(String.class), anyString());
+        verify(personaService, never()).saveMasterKeyHash(any());
         verify(sessionService).markCompleted("session-1", "persona-1");
     }
 
@@ -272,5 +276,36 @@ public class MatchmakerControllerTest {
 
         assertTrue(resp.getReply().contains("不存在"));
         verify(personaService, never()).createPersona(any(), anyString(), anyString(), anyString());
+    }
+
+    @Test
+    public void confirmDoesNotRequireClientMasterKey() throws Exception {
+        when(sessionService.getSession("session-1")).thenReturn(testSession);
+        Persona created = new Persona();
+        created.setId("persona-optional-key");
+        when(personaService.createPersona(any(), anyString(), nullable(String.class), anyString())).thenReturn(created);
+
+        MockMvcBuilders.standaloneSetup(controller).build().perform(
+                org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/api/matchmaker/confirm")
+                        .param("sessionId", "session-1"))
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isOk())
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.complete").value(true));
+        verify(personaService, never()).saveMasterKeyHash(any());
+    }
+
+    @Test
+    public void chatRejectsSkippedStagesAndPrematureCompletion() {
+        when(sessionService.getSession("session-1")).thenReturn(testSession);
+        MatchmakerResponse response = new MatchmakerResponse();
+        response.setReply("ready");
+        response.setNextStage("sample_confirm");
+        response.setIsComplete(true);
+        when(pythonClient.matchmakerChat(any())).thenReturn(response);
+        MatchmakerChatRequest request = new MatchmakerChatRequest();
+        request.setSessionId("session-1");
+        request.setUserMessage("hello");
+        MatchmakerChatResponse result = controller.chat(request);
+        assertEquals("basic_profile", result.getCurrentStage());
+        assertFalse(result.isComplete());
     }
 }

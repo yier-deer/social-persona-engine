@@ -1,4 +1,5 @@
 server:
+  address: 127.0.0.1
   port: 8080
 
 spring:
@@ -51,6 +52,9 @@ python:
 # 图片生成输出目录
 app:
   image-dir: data/generated_images
+  config-file: ${SOCIAL_PERSONA_CONFIG_FILE:./data/system_config.json}
+  automation:
+    enabled: true
 
 # 日志级别
 logging:

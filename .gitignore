@@ -53,3 +53,6 @@ napcat_onekey.zip
 # 系统文件
 .DS_Store
 Thumbs.db
+
+# Local service lifecycle state
+.runtime/

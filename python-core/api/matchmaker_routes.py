@@ -5,6 +5,7 @@
   attachment_explore → system_detail → capability_config → sample_confirm
 """
 from fastapi import APIRouter
+from api.errors import upstream_error
 from api.models import MatchmakerRequest, MatchmakerResponse
 from engine.llm.factory import create_provider
 from engine.prompt_templates import build_matchmaker_prompt
@@ -43,7 +44,4 @@ async def matchmaker_chat(request: MatchmakerRequest):
         )
 
     except Exception as e:
-        return MatchmakerResponse(
-            reply=f"抱歉，出了点问题：{e}。我们重试一下？",
-            next_stage=request.current_stage
-        )
+        raise upstream_error("matchmaker", e) from None

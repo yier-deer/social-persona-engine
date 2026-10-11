@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS personas (
     ai_qq                       TEXT,
     matchmaker_raw_data         TEXT,
     status                      TEXT DEFAULT 'active'
-                                CHECK (status IN ('active', 'sleeping', 'archived', 'request_pending')),
+                                CHECK (status IN ('active', 'sleeping', 'paused', 'archived', 'request_pending')),
     last_user_message_time       TEXT,
     created_at                  TEXT DEFAULT (datetime('now')),
     updated_at                  TEXT DEFAULT (datetime('now'))

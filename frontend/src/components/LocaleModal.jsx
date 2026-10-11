@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useLocale } from '../LocaleContext'
 
 const FIRST_VISIT_KEY = 'app_first_visit'
@@ -7,21 +7,24 @@ export default function LocaleModal() {
   const { locale, setLocale, t } = useLocale()
   const [visible, setVisible] = useState(false)
   const [exit, setExit] = useState(false)
+  const exitTimer = useRef(null)
 
   useEffect(() => {
     const visited = localStorage.getItem(FIRST_VISIT_KEY)
-    if (!visited) {
-      setTimeout(() => setVisible(true), 300)
+    const showTimer = !visited ? setTimeout(() => setVisible(true), 300) : null
+    return () => {
+      clearTimeout(showTimer)
+      clearTimeout(exitTimer.current)
     }
   }, [])
 
-  if (!visible && !exit) return null
+  if (!visible) return null
 
   const handleSelect = (lang) => {
     setLocale(lang)
     localStorage.setItem(FIRST_VISIT_KEY, 'true')
     setExit(true)
-    setTimeout(() => setVisible(false), 400)
+    exitTimer.current = setTimeout(() => setVisible(false), 400)
   }
 
   return (

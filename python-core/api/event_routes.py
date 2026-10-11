@@ -5,7 +5,10 @@ Day 6 新增：Mem0 记忆检索注入 + 今日反思 → 关键记忆持久化
 """
 import logging
 import time as _time  # 用于事件生成重试计时
-from fastapi import APIRouter
+from fastapi import APIRouter, BackgroundTasks
+from starlette.concurrency import run_in_threadpool
+from api.errors import upstream_error
+from api.normalization import _safe_dict, _safe_list, _safe_bool, _safe_reply, _safe_inner_thought, _safe_deltas
 from api.models import (
     EventTriggerRequest, EventTriggerResponse,
     EventGenerateRequest, EventGenerateResponse,
@@ -17,73 +20,6 @@ from engine.memory import memory_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
-
-
-def _safe_dict(raw) -> dict | None:
-    if isinstance(raw, dict):
-        return raw
-    return None
-
-
-def _safe_list(raw) -> list:
-    if isinstance(raw, list):
-        return raw
-    return []
-
-
-def _safe_bool(raw) -> bool:
-    if isinstance(raw, bool):
-        return raw
-    if isinstance(raw, str):
-        return raw.lower() in ("true", "1", "yes")
-    return bool(raw)
-
-
-def _safe_inner_thought(raw: dict) -> dict | None:
-    if not isinstance(raw, dict):
-        return None
-    return {
-        "raw_thought": str(raw.get("raw_thought", "")),
-        "attitude": str(raw.get("attitude", "neutral")),
-        "should_remember": bool(raw.get("should_remember", False)),
-        "memorable_point": raw.get("memorable_point"),
-    }
-
-
-def _safe_reply(raw) -> dict | None:
-    if not isinstance(raw, dict):
-        return None
-    items_raw = raw.get("items", [])
-    safe_items = []
-    if isinstance(items_raw, list):
-        for item in items_raw:
-            if isinstance(item, dict):
-                safe_items.append({
-                    "type": str(item.get("type", "text")),
-                    "content": item.get("content"),
-                    "mood_hint": item.get("mood_hint"),
-                    "content_prompt": item.get("content_prompt"),
-                    "generation_mode": item.get("generation_mode"),
-                    "delay_ms": item.get("delay_ms"),
-                })
-    return {
-        "raw_text": str(raw.get("raw_text", "")),
-        "items": safe_items,
-        "mood": str(raw.get("mood", "")),
-    }
-
-
-def _safe_deltas(raw) -> dict | None:
-    if not isinstance(raw, dict):
-        return None
-    return {
-        "trust_delta": float(raw.get("trust_delta", 0)),
-        "closeness_delta": float(raw.get("closeness_delta", 0)),
-        "tension_delta": float(raw.get("tension_delta", 0)),
-        "emotional_energy_delta": float(raw.get("emotional_energy_delta", 0)),
-        "contact_urge_delta": float(raw.get("contact_urge_delta", 0)),
-        "is_qualitative_leap": bool(raw.get("is_qualitative_leap", False)),
-    }
 
 
 def _redistribute_event_times(events: list) -> list:
@@ -126,7 +62,7 @@ def _redistribute_event_times(events: list) -> list:
 
 
 @router.post("/api/event/trigger")
-async def trigger_event(request: EventTriggerRequest):
+async def trigger_event(request: EventTriggerRequest, background_tasks: BackgroundTasks = None):
     """..."""
     try:
         provider = create_provider(request.api_config)
@@ -135,7 +71,7 @@ async def trigger_event(request: EventTriggerRequest):
         current_context = request.persona_config.get("character_current_context", "")
 
         event_desc = request.current_event.get("description", "")
-        mem_results = memory_service.search(
+        mem_results = await run_in_threadpool(memory_service.search,
             f"事件: {event_desc} | 处境: {current_context}", persona_id, limit=3,
             api_config=request.api_config
         )
@@ -162,7 +98,7 @@ async def trigger_event(request: EventTriggerRequest):
             all_memories.append({"content": m})
         if all_memories:
             memory_text = "\n".join(
-                f"- {m.get('content', m)}" for m in all_memories[:3]
+                f"- {m.get('content', '') if isinstance(m, dict) else m}" for m in all_memories[:3]
             )
             user_prompt += f"\n\n相关记忆：\n{memory_text}"
 
@@ -175,8 +111,10 @@ async def trigger_event(request: EventTriggerRequest):
         if safe_thought.get("should_remember"):
             memorable = safe_thought.get("memorable_point", "")
             if memorable:
-                memory_service.add(memorable, persona_id, api_config=request.api_config)
-                logger.info(f"记忆写入: persona={persona_id}, content={memorable[:60]}...")
+                if background_tasks is not None:
+                    background_tasks.add_task(memory_service.add, memorable, persona_id, api_config=request.api_config)
+                else:
+                    await run_in_threadpool(memory_service.add, memorable, persona_id, api_config=request.api_config)
 
         # 手动构造响应，绕过 Pydantic response_model 二次校验
         # DeepSeek 偶尔返回空字符串 "" 替代 null → Pydantic dict/list 类型拒绝
@@ -194,14 +132,11 @@ async def trigger_event(request: EventTriggerRequest):
         }
 
     except Exception as e:
-        return EventTriggerResponse(
-            should_contact_user=False,
-            inner_thought=InnerThought(raw_thought=f"[系统错误] {e}", attitude="neutral")
-        )
+        raise upstream_error("event_trigger", e) from None
 
 
 @router.post("/api/event/generate", response_model=EventGenerateResponse)
-async def generate_events(request: EventGenerateRequest):
+async def generate_events(request: EventGenerateRequest, background_tasks: BackgroundTasks = None):
     """
     ★ 每日凌晨 → 生成今日反思 + 明天事件线
 
@@ -236,10 +171,13 @@ async def generate_events(request: EventGenerateRequest):
         _elapsed = _time.monotonic() - _t0
 
         # ★ Day 6 新增：今日反思 → 关键记忆批量持久化
-        reflection = result.get("today_reflection", {})
+        reflection = result.get("today_reflection") or {}
         key_memories = reflection.get("key_memories", [])
         if key_memories:
-            memory_service.add_batch(key_memories, persona_id, api_config=request.api_config)
+            if background_tasks is not None:
+                background_tasks.add_task(memory_service.add_batch, key_memories, persona_id, api_config=request.api_config)
+            else:
+                await run_in_threadpool(memory_service.add_batch, key_memories, persona_id, api_config=request.api_config)
 
         # ★ 安全网：检测 LLM 是否照抄了 null 占位符
         transition = reflection.get("life_stage_transition", {})
@@ -269,7 +207,10 @@ async def generate_events(request: EventGenerateRequest):
                 refl = result.get("today_reflection", {})
                 km = refl.get("key_memories", [])
                 if km:
-                    memory_service.add_batch(km, persona_id, api_config=request.api_config)
+                    if background_tasks is not None:
+                        background_tasks.add_task(memory_service.add_batch, km, persona_id, api_config=request.api_config)
+                    else:
+                        await run_in_threadpool(memory_service.add_batch, km, persona_id, api_config=request.api_config)
                 return EventGenerateResponse(
                     today_reflection=refl,
                     events=events,
@@ -286,6 +227,4 @@ async def generate_events(request: EventGenerateRequest):
         )
 
     except Exception as e:
-        return EventGenerateResponse(
-            events=[{"time": "23:00", "type": "sleep", "description": "睡着"}]
-        )
+        raise upstream_error("event_generate", e) from None

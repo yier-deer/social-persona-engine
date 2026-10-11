@@ -1,27 +1,15 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import SkeletonCard from '../components/SkeletonCard'
 import { useLocale } from '../LocaleContext'
-
-const CACHE_TTL = 30000
-let cachedPersonas = null
-let cachedAt = 0
+import { requestJson } from '../api'
 
 export default function PersonaList() {
   const { t } = useLocale()
 
-  const [personas, setPersonas] = useState(() => {
-    if (cachedPersonas && Date.now() - cachedAt < CACHE_TTL) {
-      return cachedPersonas
-    }
-    return []
-  })
-  const [loading, setLoading] = useState(() => {
-    if (cachedPersonas && Date.now() - cachedAt < CACHE_TTL) {
-      return false
-    }
-    return true
-  })
+  const [personas, setPersonas] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
   const [search, setSearch] = useState('')
   const [sortBy, setSortBy] = useState('default')
   const [menuOpen, setMenuOpen] = useState(null)
@@ -36,41 +24,31 @@ export default function PersonaList() {
     { key: 'name', label: t('personaList.sortName') },
   ]
 
-  useEffect(() => {
-    if (cachedPersonas && Date.now() - cachedAt < CACHE_TTL) {
-      return
+  const load = useCallback(async (signal) => {
+    setLoading(true)
+    setError('')
+    try {
+      const data = await requestJson('/api/personas', { signal })
+      if (!Array.isArray(data)) throw new Error('Invalid persona list')
+      const populated = await Promise.all(data.map(async p => {
+        try {
+          const state = await requestJson(`/api/relationships/${p.id}`, { signal })
+          return { ...p, trustScore: state.trust ?? 0, closenessScore: state.closeness ?? 0 }
+        } catch { return p }
+      }))
+      if (!signal?.aborted) setPersonas(populated)
+    } catch (err) {
+      if (!signal?.aborted) setError(err.message)
+    } finally {
+      if (!signal?.aborted) setLoading(false)
     }
-    let cancelled = false
-    let retries = 0
-    const maxRetries = 5
-
-    const load = () => {
-      fetch('/api/personas')
-        .then(r => {
-          if (!r.ok) throw new Error('HTTP ' + r.status)
-          return r.json()
-        })
-        .then(data => {
-          if (!cancelled) {
-            const list = Array.isArray(data) ? data : []
-            cachedPersonas = list
-            cachedAt = Date.now()
-            setPersonas(list)
-          }
-        })
-        .catch(() => {
-          if (!cancelled && retries < maxRetries) {
-            retries++
-            setTimeout(load, 2000)
-          }
-        })
-        .finally(() => {
-          if (!cancelled) setLoading(false)
-        })
-    }
-    load()
-    return () => { cancelled = true }
   }, [])
+
+  useEffect(() => {
+    const controller = new AbortController()
+    load(controller.signal)
+    return () => controller.abort()
+  }, [load])
 
   useEffect(() => {
     const handler = (e) => { if (menuRef.current && !menuRef.current.contains(e.target)) setMenuOpen(null) }
@@ -80,35 +58,35 @@ export default function PersonaList() {
 
   const filtered = personas.filter(p => {
     if (!search.trim()) return true
-    const ctx = (p.characterCurrentContext || '').toLowerCase()
-    return ctx.includes(search.toLowerCase())
+    const text = `${p.name || ''} ${p.characterCurrentContext || ''}`.toLowerCase()
+    return text.includes(search.trim().toLowerCase())
   })
 
   const sorted = [...filtered].sort((a, b) => {
     switch (sortBy) {
       case 'active':
-        return (b.lastActiveAt || 0) - (a.lastActiveAt || 0)
-      case 'trust':
-        return (b.trustScore || 0) - (a.trustScore || 0)
-      case 'closeness':
-        return (b.closenessScore || 0) - (a.closenessScore || 0)
+        return (Date.parse(b.lastUserMessageTime || '') || 0) - (Date.parse(a.lastUserMessageTime || '') || 0)
+      case 'trust': return (b.trustScore ?? 0) - (a.trustScore ?? 0)
+      case 'closeness': return (b.closenessScore ?? 0) - (a.closenessScore ?? 0)
       case 'name':
         return (getName(a, t('personaList.unknownName')) || '').localeCompare(getName(b, t('personaList.unknownName')) || '', 'zh-CN')
       default:
-        return (b.createdAt || 0) - (a.createdAt || 0)
+        return (Date.parse(b.createdAt || '') || 0) - (Date.parse(a.createdAt || '') || 0)
     }
   })
 
   const handleToggle = async (e, persona) => {
     e.stopPropagation()
-    const r = await fetch(`/api/personas/${persona.id}/toggle`, { method: 'POST' })
-    const j = await r.json()
-    setPersonas(prev => prev.map(p => p.id === persona.id ? { ...p, status: j.new_status } : p))
-    cachedAt = 0
+    try {
+      const j = await requestJson(`/api/personas/${persona.id}/toggle`, { method: 'POST' })
+      setPersonas(prev => prev.map(p => p.id === persona.id ? { ...p, status: j.new_status } : p))
+    } catch (err) { setError(err.message) }
   }
 
   const handleExport = async (persona) => {
+    try {
     const r = await fetch(`/api/personas/${persona.id}/export`)
+    if (!r.ok) throw new Error(`HTTP ${r.status}`)
     const text = await r.text()
     const blob = new Blob([text], { type: 'application/json' })
     const url = URL.createObjectURL(blob)
@@ -116,15 +94,18 @@ export default function PersonaList() {
     a.href = url
     a.download = `${getName(persona, t('personaList.unknownName')) || 'persona'}.json`
     a.click()
+    URL.revokeObjectURL(url)
     setMenuOpen(null)
+    } catch (err) { setError(err.message) }
   }
 
   const handleArchive = async (persona) => {
     if (!window.confirm(t('personaList.confirmArchive'))) return
-    await fetch(`/api/personas/${persona.id}/archive`, { method: 'POST' })
-    setPersonas(prev => prev.filter(p => p.id !== persona.id))
-    cachedAt = 0
-    setMenuOpen(null)
+    try {
+      await requestJson(`/api/personas/${persona.id}/archive`, { method: 'POST' })
+      setPersonas(prev => prev.filter(p => p.id !== persona.id))
+      setMenuOpen(null)
+    } catch (err) { setError(err.message) }
   }
 
   const handleImport = () => {
@@ -136,19 +117,17 @@ export default function PersonaList() {
       if (!file) return
       const text = await file.text()
       try {
-        const r = await fetch('/api/personas/import', {
+        const j = await requestJson('/api/personas/import', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: text,
         })
-        const j = await r.json()
         if (j.status === 'ok') {
-          const newPersona = await fetch(`/api/personas/${j.id}`).then(r => r.json())
+          const newPersona = await requestJson(`/api/personas/${j.id}`)
           setPersonas(prev => [newPersona, ...prev])
-          cachedAt = 0
         }
       } catch (err) {
-        alert(t('personaList.importFail'))
+        setError(t('personaList.importFail'))
       }
     }
     input.click()
@@ -158,7 +137,7 @@ export default function PersonaList() {
     <div className="animate-fade-up">
       {/* 标题栏 */}
       <div className="mb-8 pt-4">
-        <div className="flex items-end justify-between mb-4">
+        <div className="flex items-end justify-between flex-wrap gap-4 mb-4">
           <div>
             <h1 className="font-serif text-3xl font-semibold text-jade-700 tracking-wide">
               {t('personaList.title')}
@@ -169,7 +148,8 @@ export default function PersonaList() {
                 : t('personaList.subtitleEmpty')}
             </p>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center flex-wrap gap-2">
+            <button onClick={() => load()} disabled={loading} className="text-sm text-jade-600 disabled:opacity-40">{t('common.refresh')}</button>
             <button onClick={handleImport}
               className="px-4 py-2.5 rounded-full text-sm font-medium bg-jade-50 text-jade-600 hover:bg-jade-100 transition-all">
               {t('common.import')}
@@ -200,6 +180,7 @@ export default function PersonaList() {
           </select>
         </div>
       </div>
+      {error && <div role="alert" className="text-sm text-red-600 mb-4">{error} <button onClick={() => load()} className="underline ml-3">{t('common.retry')}</button></div>}
 
       {/* 加载态 */}
       {loading && (

@@ -76,6 +76,7 @@ function buildInitialForm(persona) {
   const rawData = parseJsonField(persona.matchmakerRawData, {})
 
   return {
+    rawData,
     // 基础信息
     name: persona.name || '',
     birthday: persona.birthday || '',
@@ -85,7 +86,7 @@ function buildInitialForm(persona) {
     currentLocation: persona.currentLocation || '',
     relationshipPhase: persona.relationshipPhase || 'stranger',
     // 风格锚定（matchmakerRawData 中 LLM 输出 snake_case 键名）
-    speechStyle: [rawData.speech_style_reference, rawData.speech_style_details].filter(Boolean).join('；') || '',
+    speechStyle: [rawData.speech_style, rawData.speech_style_reference, rawData.speech_style_details].filter(Boolean).join('；') || '',
     speechStyleReference: rawData.speech_style_reference || '',
     speechStyleDetails: rawData.speech_style_details || '',
     conflictStyleHint: rawData.conflict_style_hint || '',
@@ -131,6 +132,8 @@ function buildInitialForm(persona) {
 function buildSavePayload(form) {
   // 牵线人中收集的中间字段（LLM 输出 snake_case 键名，保持一致）
   const rawData = {
+    ...form.rawData,
+    speech_style: form.speechStyle || undefined,
     speech_style_reference: form.speechStyleReference || undefined,
     speech_style_details: form.speechStyleDetails || undefined,
     conflict_style_hint: form.conflictStyleHint || undefined,
@@ -170,8 +173,8 @@ function buildSavePayload(form) {
     currentLocation: form.currentLocation || undefined,
     birthday: form.birthday || undefined,
     relationshipPhase: form.relationshipPhase || undefined,
-    aiQq: form.aiQq || undefined,
-    ownerQq: form.ownerQq || undefined,
+    aiQq: form.aiQq.trim(),
+    ownerQq: form.ownerQq.trim(),
     matchmakerRawData: JSON.stringify(rawData),
   }
 }

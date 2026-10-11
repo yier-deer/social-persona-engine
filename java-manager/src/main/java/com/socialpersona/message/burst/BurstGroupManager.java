@@ -7,10 +7,12 @@ import com.socialpersona.message.websocket.QQWebSocketHandler;
 import com.socialpersona.middleware.InterruptListener;
 import com.socialpersona.middleware.TypingSpeedSimulator;
 import com.socialpersona.persona.entity.Persona;
+import com.socialpersona.persona.service.PersonaService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.util.Comparator;
@@ -36,6 +38,9 @@ import java.util.concurrent.TimeUnit;
 @Component
 public class BurstGroupManager {
 
+    @Value("${app.automation.enabled:true}")
+    private boolean automationEnabled = true;
+
     private static final Logger log = LoggerFactory.getLogger(BurstGroupManager.class);
 
     /** 延迟发送线程池（2 线程足够——极少同时多个连发组活跃） */
@@ -53,6 +58,9 @@ public class BurstGroupManager {
     @Autowired
     private QQWebSocketHandler qqWs;
 
+    @Autowired
+    private PersonaService personaService;
+
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     /**
@@ -65,6 +73,7 @@ public class BurstGroupManager {
      * @param persona   人格实体（用于取打字速度/依恋维度）
      */
     public void scheduleBurst(String personaId, List<ScheduledMessage> group, Persona persona) {
+        if (!automationEnabled) return;
         if (group.size() <= 1) return;  // 只有 1 条不需要调度
 
         // 按 burst_order 排序
@@ -91,6 +100,9 @@ public class BurstGroupManager {
             final long delay = cumulativeDelay;
 
             executor.schedule(() -> {
+                if (!automationEnabled) return;
+                Persona current = personaService.getById(personaId);
+                if (current == null || !"active".equals(current.getStatus())) return;
                 // ★ 发送前检查中断
                 if (interruptListener.isInterrupted(personaId)) {
                     log.debug("Burst interrupted for persona {}, skipping item {}", personaId, index);
@@ -112,9 +124,14 @@ public class BurstGroupManager {
                 }
 
                 // ★ 延迟消息也推 QQ
-                String ownerQq = persona != null ? persona.getOwnerQq() : null;
+                String ownerQq = current.getOwnerQq();
                 if (ownerQq != null && !ownerQq.isEmpty() && textContent != null && !textContent.isEmpty()) {
-                    qqWs.sendReply(ownerQq, textContent);
+                    try {
+                        qqWs.sendReply(current.getAiQq(), ownerQq, textContent);
+                    } catch (Exception e) {
+                        log.warn("Burst QQ发送失败: {}", e.getClass().getSimpleName());
+                        return;
+                    }
                 }
 
                 // 标记已发送

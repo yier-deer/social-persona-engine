@@ -74,7 +74,7 @@
     </update>
 
     <!--
-        findAllToday：查今天所有未失效事件（前端事件线展示用）
+        findAllToday：保留今天完整事件线（包括已消费/作废记录）
         不按 event_time 过滤，因为前端需要看到全天的事件（含未来的）
     -->
     <select id="findAllToday" resultType="com.socialpersona.event.entity.DailyEvent">
@@ -82,7 +82,6 @@
         FROM daily_events
         WHERE persona_id = #{personaId}
           AND event_date = #{today}
-          AND is_active = 1
         ORDER BY event_time ASC
     </select>
 

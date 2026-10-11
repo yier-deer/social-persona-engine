@@ -9,6 +9,34 @@ LLM Provider 工厂
 """
 from .provider import LLMProvider
 from .openai_provider import OpenAICompatibleProvider
+from urllib.parse import urlsplit
+
+
+DEFAULTS = {
+    "deepseek": ("https://api.deepseek.com/v1", "deepseek-chat"),
+    "openai": ("https://api.openai.com/v1", "gpt-4o"),
+    "anthropic": ("https://api.anthropic.com/v1", "claude-sonnet-4-20250514"),
+    "custom": ("", ""),
+}
+
+
+def resolve_api_config(api_config: dict) -> dict:
+    provider = str(api_config.get("provider") or "deepseek").strip().lower()
+    if provider not in DEFAULTS:
+        raise ValueError("Unsupported LLM provider")
+    default_url, default_model = DEFAULTS[provider]
+    config = {
+        "provider": provider,
+        "api_key": str(api_config.get("api_key") or "").strip(),
+        "base_url": str(api_config.get("base_url") or default_url).strip().rstrip("/"),
+        "model": str(api_config.get("model") or default_model).strip(),
+    }
+    if not config["api_key"] or not config["model"] or not config["base_url"]:
+        raise ValueError("API key, model and endpoint are required")
+    url = urlsplit(config["base_url"])
+    if url.scheme not in {"http", "https"} or not url.hostname or url.username or url.password:
+        raise ValueError("Endpoint must be an HTTP(S) URL without embedded credentials")
+    return config
 
 
 def create_provider(api_config: dict) -> LLMProvider:
@@ -30,34 +58,12 @@ def create_provider(api_config: dict) -> LLMProvider:
     ★ 为什么返回抽象类型 LLMProvider：
       调用方不关心具体是 DeepSeek 还是 OpenAI，只调用 provider.chat()。
     """
-    provider_name = api_config.get("provider", "deepseek").lower()
-    api_key = api_config.get("api_key", "")
-    base_url = api_config.get("base_url", "https://api.deepseek.com/v1")
-    model = api_config.get("model", "deepseek-chat")
-
-    if provider_name == "openai":
-        return OpenAICompatibleProvider(
-            base_url=base_url or "https://api.openai.com/v1",
-            api_key=api_key,
-            model=model or "gpt-4o",
-        )
-
-    if provider_name == "deepseek":
-        return OpenAICompatibleProvider(
-            base_url=base_url or "https://api.deepseek.com/v1",
-            api_key=api_key,
-            model=model or "deepseek-chat",
-        )
-
-    # anthropic 也走 OpenAI 兼容接口（Anthropic 已支持）
-    if provider_name == "anthropic":
-        return OpenAICompatibleProvider(
-            base_url=base_url or "https://api.anthropic.com/v1",
-            api_key=api_key,
-            model=model or "claude-3.5-sonnet",
-        )
-
-    raise ValueError(f"不支持的 LLM Provider: {provider_name}")
+    config = resolve_api_config(api_config)
+    args = {key: config[key] for key in ("base_url", "api_key", "model")}
+    if config["provider"] == "anthropic":
+        from .anthropic_provider import AnthropicProvider
+        return AnthropicProvider(**args)
+    return OpenAICompatibleProvider(**args)
 
 
 def create_image_generator(image_config: dict):

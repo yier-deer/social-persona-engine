@@ -11,7 +11,6 @@ import com.socialpersona.gateway.dto.EventTriggerRequest;
 import com.socialpersona.gateway.dto.EventTriggerResponse;
 import com.socialpersona.message.service.MessageService;
 import com.socialpersona.message.scheduler.MessageScanScheduler;
-import com.socialpersona.persona.dto.ApiConfigDTO;
 import com.socialpersona.persona.entity.Persona;
 import com.socialpersona.persona.repository.PersonaMapper;
 import com.socialpersona.persona.service.PersonaService;
@@ -25,6 +24,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.event.EventListener;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -50,6 +50,9 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 @Component
 public class EventTriggerScheduler {
+
+    @Value("${app.automation.enabled:true}")
+    private boolean automationEnabled = true;
 
     private static final Logger log = LoggerFactory.getLogger(EventTriggerScheduler.class);
 
@@ -83,15 +86,17 @@ public class EventTriggerScheduler {
     // ========== 自适应扫描频率 ==========
 
     private final ConcurrentHashMap<String, ScanLevel> personaScanLevel = new ConcurrentHashMap<>();
+    private final java.util.Set<String> scansInProgress = ConcurrentHashMap.newKeySet();
 
     enum ScanLevel { IDLE, MINUTE_WATCH }
 
     /** 每小时检查：下一小时是否有事件。额外检测"事件全部过期"死锁并提供自救。 */
     @Scheduled(fixedDelay = 3600000)
     public void hourlyEventCheck() {
+        if (!automationEnabled) return;
         String today = LocalDate.now().format(DATE_FMT);
         String now = LocalTime.now().format(TIME_FMT);
-        for (Persona persona : personaService.listActive()) {
+        for (Persona persona : personaService.listEnabled()) {
             String personaId = persona.getId();
             String inOneHour = LocalTime.now().plusHours(1).format(TIME_FMT);
             int count = eventService.countBetween(personaId, today, now, inOneHour);
@@ -115,12 +120,13 @@ public class EventTriggerScheduler {
     /** 分钟级扫描：只扫描标记为 MINUTE_WATCH 的 Persona */
     @Scheduled(fixedDelay = 60000)
     public void minuteEventCheck() {
+        if (!automationEnabled) return;
         String today = LocalDate.now().format(DATE_FMT);
         for (Map.Entry<String, ScanLevel> entry : personaScanLevel.entrySet()) {
             if (entry.getValue() != ScanLevel.MINUTE_WATCH) continue;
             String personaId = entry.getKey();
             Persona persona = personaService.getById(personaId);
-            if (persona == null) {
+            if (!isEnabled(persona)) {
                 personaScanLevel.remove(personaId);
                 continue;
             }
@@ -130,7 +136,7 @@ public class EventTriggerScheduler {
             String now = LocalTime.now().format(TIME_FMT);
             String hourEnd = LocalTime.now().withMinute(59).withSecond(59).format(TIME_FMT);
             int remaining = eventService.countBetween(personaId, today, now, hourEnd);
-            if (remaining == 0) {
+            if (remaining == 0 && eventService.findDue(personaId).isEmpty()) {
                 personaScanLevel.put(personaId, ScanLevel.IDLE);
                 log.debug("EVENT_SCAN[{}]: 本小时无更多事件, 恢复IDLE", personaId);
             }
@@ -140,7 +146,8 @@ public class EventTriggerScheduler {
     // 原 scanEvents() 被 hourlyEventCheck + minuteEventCheck 替代
     // 保留手动触发版本供测试和管理调用
     public void scanEvents() {
-        List<Persona> activePersonas = personaService.listActive();
+        if (!automationEnabled) return;
+        List<Persona> activePersonas = personaService.listEnabled();
         if (activePersonas.isEmpty()) return;
 
         log.debug("scanEvents: scanning {} active personas...", activePersonas.size());
@@ -157,7 +164,8 @@ public class EventTriggerScheduler {
      *  解决：服务器持续运行但没有重启/心跳触发懒加载时，跨天后仍能自动生成新一天的事件线 */
     @Scheduled(cron = "0 5 0 * * ?")
     public void midnightEventGeneration() {
-        List<Persona> active = personaService.listActive();
+        if (!automationEnabled) return;
+        List<Persona> active = personaService.listEnabled();
         if (active.isEmpty()) {
             log.debug("午夜事件生成: 无活跃 Persona");
             return;
@@ -177,6 +185,16 @@ public class EventTriggerScheduler {
      * ★ Day 10：完整接入 Python——填充全部请求字段
      */
     public void scanForPersona(Persona persona) {
+        if (!automationEnabled || !isEnabled(persona)) return;
+        if (!scansInProgress.add(persona.getId())) return;
+        try {
+            executeDueEvents(persona);
+        } finally {
+            scansInProgress.remove(persona.getId());
+        }
+    }
+
+    private void executeDueEvents(Persona persona) {
         String personaId = persona.getId();
         List<DailyEvent> due = eventService.findDue(personaId);
         if (due.isEmpty()) {
@@ -185,41 +203,32 @@ public class EventTriggerScheduler {
                 lazyGenerateTodayEventsIfNeeded(personaId);
                 return;
             }
-            // 兜底B: 事件线断裂检测 —— 有事件但当前时间之后无下一事件
-            String now = LocalTime.now().format(TIME_FMT);
-            String today = LocalDate.now().format(DATE_FMT);
-            DailyEvent nextEvent = eventService.findNextActiveAfter(personaId, today, now);
-            if (nextEvent == null) {
-                log.info("事件线断裂: persona={}, {}之后无下一事件, 补生成到凌晨", personaId, now);
-                fillEventsFromNow(personaId, persona);
-            }
             return;
         }
 
         for (DailyEvent event : due) {
             if ("sleep".equals(event.getEventType())) {
                 stateMachine.onSleepEvent(personaId);
+                eventService.invalidateEvent(event.getId());
                 log.info("Persona {} → SLEEPING (sleep event: {})", personaId, event.getEventTime());
                 continue;
             }
 
             if (stateMachine.getState(personaId) == AIStatus.SLEEPING) {
-                log.debug("Persona {} is SLEEPING, skipping event {}", personaId, event.getEventType());
-                continue;
+                if ("routine".equals(event.getEventType())) {
+                    stateMachine.onWakeUpEvent(personaId);
+                    persona.setStatus("active");
+                } else {
+                    eventService.invalidateEvent(event.getId());
+                    continue;
+                }
             }
 
             DailyEvent nextEvent = eventService.findNextActive(personaId, event.getEventTime());
 
             try {
-                ApiConfigDTO apiConfig = personaService.decryptApiConfig(personaId);
-
                 EventTriggerRequest request = new EventTriggerRequest();
-                request.setApiConfig(Map.of(
-                        "provider", apiConfig != null ? apiConfig.getProvider() : "deepseek",
-                        "api_key", apiConfig != null ? apiConfig.getApiKey() : "",
-                        "base_url", apiConfig != null ? apiConfig.getBaseUrl() : "",
-                        "model", apiConfig != null ? apiConfig.getModel() : ""
-                ));
+                request.setApiConfig(personaService.loadGlobalApiConfig());
                 request.setPersonaConfig(new LinkedHashMap<>(Map.of(
                         "id", personaId,
                         "name", persona.getName() != null ? persona.getName() : "AI网友"
@@ -260,6 +269,7 @@ public class EventTriggerScheduler {
                 }
 
                 EventTriggerResponse resp = pythonClient.triggerEvent(request);
+                if (resp == null) throw new IllegalStateException("Empty event response");
 
                 // ★ 始终记录 LLM 响应到 event_log（即使 AI 决定不联系用户）
                 // 这样 SimController 的 /api/sim/trigger-events 可准确判断 LLM 是否被调用
@@ -295,9 +305,11 @@ public class EventTriggerScheduler {
 
                 // ★ 应用关系增量：事件也可能影响信任/亲密/张力
                 if (resp != null) applyDeltas(personaId, resp.getRelationshipDeltas());
+                eventService.invalidateEvent(event.getId());
 
             } catch (Exception e) {
-                log.error("事件触发失败 persona={}, event={}: {}", personaId, event.getEventType(), e.getMessage());
+                log.warn("事件触发失败，保留以便重试 persona={}, event={}, error={}",
+                        personaId, event.getEventType(), e.getClass().getSimpleName());
             }
         }
     }
@@ -313,26 +325,20 @@ public class EventTriggerScheduler {
      * 幂等：已有事件则跳过
      */
     public void lazyGenerateTodayEventsIfNeeded(String personaId) {
+        if (!automationEnabled) return;
         if (eventService.hasTodayEvents(personaId)) {
             log.debug("事件已存在，跳过懒加载: persona={}", personaId);
             return;
         }
 
         Persona persona = personaService.getById(personaId);
-        if (persona == null) return;
+        if (!isEnabled(persona)) return;
 
         log.info("今日无事件，懒加载触发: persona={}", personaId);
 
         try {
-            ApiConfigDTO apiConfig = personaService.decryptApiConfig(personaId);
-
             EventGenerateRequest request = new EventGenerateRequest();
-            request.setApiConfig(Map.of(
-                    "provider", apiConfig != null ? apiConfig.getProvider() : "deepseek",
-                    "api_key", apiConfig != null ? apiConfig.getApiKey() : "",
-                    "base_url", apiConfig != null ? apiConfig.getBaseUrl() : "",
-                    "model", apiConfig != null ? apiConfig.getModel() : ""
-            ));
+            request.setApiConfig(personaService.loadGlobalApiConfig());
             request.setPersonaConfig(buildPersonaConfigForEvent(persona));
             RelationshipState state = relationshipEngine.getState(personaId);
             request.setRelationshipState(Map.of(
@@ -393,8 +399,9 @@ public class EventTriggerScheduler {
     @EventListener(org.springframework.boot.context.event.ApplicationReadyEvent.class)
     @Async
     public void startupGenerateEventsForAllActive() {
+        if (!automationEnabled) return;
         try {
-            List<Persona> active = personaService.listActive();
+            List<Persona> active = personaService.listEnabled();
             if (active.isEmpty()) {
                 log.info("无活跃 Persona，跳过启动事件生成");
                 return;
@@ -447,15 +454,8 @@ public class EventTriggerScheduler {
      */
     private void fillEventsFromNow(String personaId, Persona persona) {
         try {
-            ApiConfigDTO apiConfig = personaService.decryptApiConfig(personaId);
-
             EventGenerateRequest request = new EventGenerateRequest();
-            request.setApiConfig(Map.of(
-                    "provider", apiConfig != null ? apiConfig.getProvider() : "deepseek",
-                    "api_key", apiConfig != null ? apiConfig.getApiKey() : "",
-                    "base_url", apiConfig != null ? apiConfig.getBaseUrl() : "",
-                    "model", apiConfig != null ? apiConfig.getModel() : ""
-            ));
+            request.setApiConfig(personaService.loadGlobalApiConfig());
             request.setPersonaConfig(buildPersonaConfigForEvent(persona));
             request.setRelationshipState(getCurrentRelationshipState(personaId));
             request.setTodayDate(LocalDate.now().format(DATE_FMT));
@@ -652,8 +652,8 @@ public class EventTriggerScheduler {
                 DailyEvent e = new DailyEvent();
                 e.setId(java.util.UUID.randomUUID().toString());
                 e.setEventDate(LocalDate.now().format(DATE_FMT));
-                e.setEventTime(String.valueOf(m.getOrDefault("time", "12:00:00")));
-                e.setEventType(String.valueOf(m.getOrDefault("type", "routine")));
+                e.setEventTime(String.valueOf(m.getOrDefault("time", m.getOrDefault("event_time", "12:00:00"))));
+                e.setEventType(String.valueOf(m.getOrDefault("type", m.getOrDefault("event_type", "routine"))));
                 e.setDescription(String.valueOf(m.getOrDefault("description", "")));
                 e.setIsActive(1);
                 result.add(e);
@@ -684,6 +684,10 @@ public class EventTriggerScheduler {
         } catch (Exception e) {
             log.debug("应用关系增量失败(非关键): persona={}, error={}", personaId, e.getMessage());
         }
+    }
+
+    private boolean isEnabled(Persona persona) {
+        return persona != null && ("active".equals(persona.getStatus()) || "sleeping".equals(persona.getStatus()));
     }
 
     private Double toDouble(Object v) {

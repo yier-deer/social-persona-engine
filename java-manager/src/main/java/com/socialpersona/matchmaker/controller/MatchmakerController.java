@@ -20,6 +20,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.server.ResponseStatusException;
 import org.springframework.web.bind.annotation.*;
 
 import java.nio.file.*;
@@ -184,19 +186,14 @@ public class MatchmakerController {
             return resp;
 
         } catch (Exception e) {
-            log.error("Matchmaker chat error: {}", e.getMessage(), e);
-            MatchmakerChatResponse resp = new MatchmakerChatResponse();
-            resp.setSessionId(sessionId);
-            String msg = e.getMessage() != null ? e.getMessage() : "未知错误";
-            resp.setReply("抱歉，出了点问题，请重试");
-            resp.setCurrentStage(session.getCurrentStage());
-            return resp;
+            log.error("Matchmaker chat failed: {}", e.getClass().getSimpleName());
+            throw new ResponseStatusException(HttpStatus.BAD_GATEWAY, "牵线人服务暂时不可用，请重试");
         }
     }
 
     @PostMapping("/confirm")
     public MatchmakerChatResponse confirm(@RequestParam String sessionId,
-                                          @RequestParam String masterKey,
+                                          @RequestParam(required = false) String masterKey,
                                           @RequestParam(required = false) String languageHint,
                                           @RequestBody(required = false) PersonaConfigDTO configOverride) {
         MatchmakerSession session = sessionService.getSession(sessionId);
@@ -233,9 +230,6 @@ public class MatchmakerController {
             }
             config.setMatchmakerRawData(toJsonString(collected));
 
-            // 保存 masterKeyHash 到 system_config.json，供后续 API Key 解密使用
-            personaService.saveMasterKeyHash(masterKey);
-
             // ★ 防重复：检查是否已有同名活跃 Persona
             Persona existing = personaMapper.selectOne(
                 new LambdaQueryWrapper<Persona>()
@@ -271,9 +265,9 @@ public class MatchmakerController {
                 } catch (Exception ex) {
                     log.warn("清除旧对话记录失败(非关键): {}", ex.getMessage());
                 }
-                persona = personaService.createPersona(config, apiKey, masterKey, lifeArchiveJson);
+                persona = personaService.createPersona(config, apiKey, null, lifeArchiveJson);
             } else {
-                persona = personaService.createPersona(config, apiKey, masterKey, lifeArchiveJson);
+                persona = personaService.createPersona(config, apiKey, null, lifeArchiveJson);
             }
 
             sessionService.markCompleted(sessionId, persona.getId());
@@ -293,15 +287,8 @@ public class MatchmakerController {
             return resp;
 
         } catch (Exception e) {
-            log.error("Matchmaker confirm 完整异常:", e);
-            // ★ 解包 MyBatis 异常链，找出根因
-            Throwable root = e;
-            while (root.getCause() != null) root = root.getCause();
-            log.error("Matchmaker confirm 根因: {} - {}", root.getClass().getSimpleName(), root.getMessage());
-            MatchmakerChatResponse resp = new MatchmakerChatResponse();
-            String msg = e.getMessage() != null ? e.getMessage() : "未知错误";
-            resp.setReply("创建过程中出了点问题，请重试");
-            return resp;
+            log.error("Matchmaker confirm failed: {}", e.getClass().getSimpleName());
+            throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "创建过程中出了点问题，请重试");
         }
     }
 

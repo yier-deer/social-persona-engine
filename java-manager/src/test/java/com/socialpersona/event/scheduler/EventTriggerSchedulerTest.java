@@ -7,7 +7,6 @@ import com.socialpersona.gateway.dto.EventGenerateRequest;
 import com.socialpersona.gateway.dto.EventGenerateResponse;
 import com.socialpersona.gateway.dto.EventTriggerRequest;
 import com.socialpersona.gateway.dto.EventTriggerResponse;
-import com.socialpersona.persona.dto.ApiConfigDTO;
 import com.socialpersona.persona.entity.Persona;
 import com.socialpersona.persona.service.PersonaService;
 import com.socialpersona.message.scheduler.MessageScanScheduler;
@@ -80,7 +79,7 @@ public class EventTriggerSchedulerTest {
      */
     @Test
     public void testRoutineEventTriggersPythonCall() {
-        when(personaService.listActive()).thenReturn(Arrays.asList(testPersona));
+        when(personaService.listEnabled()).thenReturn(Arrays.asList(testPersona));
 
         DailyEvent routineEvent = new DailyEvent();
         routineEvent.setEventType("routine");
@@ -106,7 +105,7 @@ public class EventTriggerSchedulerTest {
      */
     @Test
     public void testSleepEventTriggersStateMachine() {
-        when(personaService.listActive()).thenReturn(Arrays.asList(testPersona));
+        when(personaService.listEnabled()).thenReturn(Arrays.asList(testPersona));
 
         DailyEvent sleepEvent = new DailyEvent();
         sleepEvent.setEventType("sleep");
@@ -125,11 +124,11 @@ public class EventTriggerSchedulerTest {
      * 场景③：AI 处于 SLEEPING → 跳过事件
      */
     @Test
-    public void testSleepingPersonaSkipped() {
-        when(personaService.listActive()).thenReturn(Arrays.asList(testPersona));
+    public void testSleepingPersonaSkipsMoment() {
+        when(personaService.listEnabled()).thenReturn(Arrays.asList(testPersona));
 
         DailyEvent routineEvent = new DailyEvent();
-        routineEvent.setEventType("routine");
+        routineEvent.setEventType("moment");
         routineEvent.setEventTime("10:00:00");
         routineEvent.setDescription("发呆时刻");
 
@@ -147,7 +146,7 @@ public class EventTriggerSchedulerTest {
      */
     @Test
     public void testNoEventsDoesNothing() {
-        when(personaService.listActive()).thenReturn(Arrays.asList(testPersona));
+        when(personaService.listEnabled()).thenReturn(Arrays.asList(testPersona));
         when(eventService.findDue("persona1")).thenReturn(Collections.emptyList());
 
         scheduler.scanEvents();
@@ -161,7 +160,7 @@ public class EventTriggerSchedulerTest {
      */
     @Test
     public void testNoActivePersonasSkipsScan() {
-        when(personaService.listActive()).thenReturn(Collections.emptyList());
+        when(personaService.listEnabled()).thenReturn(Collections.emptyList());
 
         scheduler.scanEvents();
 
@@ -173,7 +172,7 @@ public class EventTriggerSchedulerTest {
      */
     @Test
     public void testShouldContactUserSetsOwnerQq() {
-        when(personaService.listActive()).thenReturn(Arrays.asList(testPersona));
+        when(personaService.listEnabled()).thenReturn(Arrays.asList(testPersona));
 
         DailyEvent routineEvent = new DailyEvent();
         routineEvent.setEventType("moment");
@@ -208,8 +207,8 @@ public class EventTriggerSchedulerTest {
     public void testLazyGenerateCallsPythonWhenNoEvents() {
         when(eventService.hasTodayEvents("persona1")).thenReturn(false);
         when(personaService.getById("persona1")).thenReturn(testPersona);
-        when(personaService.decryptApiConfig(anyString()))
-                .thenReturn(new ApiConfigDTO("deepseek", "sk-test", "https://api.deepseek.com/v1", "deepseek-chat"));
+        when(personaService.loadGlobalApiConfig())
+                .thenReturn(Map.of("provider", "deepseek", "api_key", "sk-test", "base_url", "https://api.deepseek.com/v1", "model", "deepseek-chat"));
 
         EventGenerateResponse mockResp = new EventGenerateResponse();
         List<Object> events = new ArrayList<>();
@@ -230,15 +229,15 @@ public class EventTriggerSchedulerTest {
 
         verify(pythonClient).generateEvents(any(EventGenerateRequest.class));
         verify(eventService).insertEvents(eq("persona1"), argThat(list ->
-                list != null && list.size() == 2));
+                list != null && list.size() == 2 && "10:00:00".equals(list.get(0).getEventTime()) && "sleep".equals(list.get(1).getEventType())));
     }
 
     @Test
     public void testLazyGenerateHandlesEmptyResponse() {
         when(eventService.hasTodayEvents("persona1")).thenReturn(false);
         when(personaService.getById("persona1")).thenReturn(testPersona);
-        when(personaService.decryptApiConfig(anyString()))
-                .thenReturn(new ApiConfigDTO("deepseek", "sk-test", "", ""));
+        when(personaService.loadGlobalApiConfig())
+                .thenReturn(Map.of("provider", "deepseek", "api_key", "sk-test", "base_url", "", "model", ""));
 
         EventGenerateResponse mockResp = new EventGenerateResponse();
         mockResp.setEvents(new ArrayList<>());
@@ -253,8 +252,8 @@ public class EventTriggerSchedulerTest {
     public void testLazyGenerateHandlesPythonException() {
         when(eventService.hasTodayEvents("persona1")).thenReturn(false);
         when(personaService.getById("persona1")).thenReturn(testPersona);
-        when(personaService.decryptApiConfig(anyString()))
-                .thenReturn(new ApiConfigDTO("deepseek", "sk-test", "", ""));
+        when(personaService.loadGlobalApiConfig())
+                .thenReturn(Map.of("provider", "deepseek", "api_key", "sk-test", "base_url", "", "model", ""));
         when(pythonClient.generateEvents(any(EventGenerateRequest.class)))
                 .thenThrow(new RuntimeException("Python 不可用"));
 

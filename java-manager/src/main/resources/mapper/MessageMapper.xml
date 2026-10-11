@@ -65,4 +65,18 @@
         ORDER BY scheduled_time ASC
     </select>
 
+    <select id="findDue" resultType="com.socialpersona.message.entity.ScheduledMessage">
+        SELECT *
+        FROM scheduled_messages
+        WHERE persona_id = #{personaId}
+          AND is_sent = 0
+          AND (
+              (scheduled_time LIKE '____-__-__T%' AND scheduled_time &lt;= #{nowInstant})
+              OR
+              (scheduled_time NOT LIKE '____-__-__T%' AND scheduled_time &lt;= #{localTime})
+          )
+        ORDER BY scheduled_time ASC
+        LIMIT #{limit}
+    </select>
+
 </mapper>

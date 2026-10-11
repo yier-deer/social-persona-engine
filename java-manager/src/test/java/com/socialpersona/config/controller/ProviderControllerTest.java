@@ -79,24 +79,27 @@ public class ProviderControllerTest {
 
     @Test
     public void testRefreshModelsOnCustomFallbackToBaseUrl() throws Exception {
-        // custom_image 的 models_url=null，但传 baseUrl → 应 fallback 到 {baseUrl}/models
-        // 不实际发起 HTTP 请求（会连不通），只验证不抛异常且返回合理的错误信息
+        com.sun.net.httpserver.HttpServer server = com.sun.net.httpserver.HttpServer.create(
+                new java.net.InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/v1/models", exchange -> {
+            byte[] response = "{\"data\":[{\"id\":\"local-test-model\"}]}".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, response.length);
+            try (var output = exchange.getResponseBody()) { output.write(response); }
+        });
+        server.start();
         Map<String, String> body = Map.of(
                 "apiKey", "sk-test",
-                "baseUrl", "https://custom-image-service.com/v1"
+                "baseUrl", "http://127.0.0.1:" + server.getAddress().getPort() + "/v1"
         );
-
-        // 应该尝试连接（会失败），但不应返回 "该 Provider 不支持在线获取模型列表"
-        String content = mockMvc.perform(post("/api/config/providers/custom_image/refresh-models")
+        try {
+            mockMvc.perform(post("/api/config/providers/custom_image/refresh-models")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(body)))
                 .andExpect(status().isOk())
-                .andReturn().getResponse().getContentAsString();
-
-        // 不应是 models_url=null 的早期返回
-        org.junit.jupiter.api.Assertions.assertFalse(
-                content.contains("不支持在线获取模型列表"),
-                "custom_image 有 baseUrl 时应尝试连接而非直接拒绝"
-        );
+                .andExpect(jsonPath("$.success").value(true))
+                .andExpect(jsonPath("$.models[0].id").value("local-test-model"));
+        } finally {
+            server.stop(0);
+        }
     }
 }

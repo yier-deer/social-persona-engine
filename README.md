@@ -8,7 +8,7 @@
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License"></a>
   <a href="#"><img src="https://img.shields.io/badge/python-3.12+-blue.svg" alt="Python"></a>
   <a href="#"><img src="https://img.shields.io/badge/java-21+-orange.svg" alt="Java"></a>
-  <a href="#"><img src="https://img.shields.io/badge/node-18+-green.svg" alt="Node"></a>
+  <a href="#"><img src="https://img.shields.io/badge/node-20.19%2B%20%2F%2022.12%2B-green.svg" alt="Node"></a>
 </p>
 
 ---
@@ -74,30 +74,29 @@ A **relationship-state-driven** AI social simulation system. Not a chatbot — a
 | [Java (JDK)](https://adoptium.net/) | 21+ | Yes | Spring Boot backend |
 | [Maven](https://maven.apache.org/) | 3.6+ | Yes | Java build tool |
 | [Python](https://www.python.org/) | 3.12+ | Yes | LLM orchestration + memory |
-| [Node.js](https://nodejs.org/) | 18+ | Yes | Frontend admin panel |
+| [Node.js](https://nodejs.org/) | 20.19+ or 22.12+ | Yes | Frontend admin panel |
 | Redis | — | No | Falls back to in-memory cache if unavailable |
 | [NapCat QQ](https://github.com/NapNeko/NapCatQQ) | — | Yes | QQ bridge; user installs separately |
-| LLM API Key | — | Yes | Any OpenAI-compatible provider (DeepSeek, OpenAI, Anthropic, custom endpoint) |
+| LLM API Key | — | Yes | DeepSeek, OpenAI, native Anthropic, or a custom OpenAI-compatible endpoint |
 
 ## Quick Start
 
 ### 1. Install dependencies
 
-```bash
-# Python
-cd python-core
-python -m venv .venv
-.venv\Scripts\activate        # Windows
-pip install -r requirements.txt
+Run these commands from the repository root on Windows:
 
-# Frontend
-cd frontend
-npm install
+```powershell
+python -m venv python-core/.venv
+python-core/.venv/Scripts/python.exe -m pip install -r python-core/requirements-dev.txt
+Push-Location frontend
+npm ci
+Pop-Location
+python-core/.venv/Scripts/python.exe python-core/startup_check.py
 ```
 
 ### 2. Configure the LLM provider
 
-When you first open `http://localhost:5173`, an onboarding wizard will guide you through LLM provider configuration, image model setup, and QQ account binding — all from the web UI. You can also manage providers anytime in **Settings**.
+When you first open the frontend URL printed by `start.bat` (normally `http://localhost:5173`, or the next free port), an onboarding wizard will guide you through LLM provider configuration, image model setup, and QQ account binding — all from the web UI. You can also manage providers anytime in **Settings**.
 
 To configure manually, copy the template and edit the JSON file:
 
@@ -117,32 +116,33 @@ Edit `system_config.json`:
 | `imageProvider` | Image generation provider (optional) |
 | `imageApiKeyEncrypted` | Image API key, Base64-encoded (optional) |
 
+The legacy `*Encrypted` configuration fields use Base64 encoding, which is not encryption. Keep this local file private; `.gitignore` excludes it from commits.
+
 ### 3. Launch
 
-Double-click `start.bat`. On first launch, the script automatically:
-1. Installs Python dependencies
-2. Downloads the embedding model (`BAAI/bge-small-zh-v1.5`, ~47 MB) — cached locally afterward
-3. Starts all services: Python → Java → Frontend
+Double-click `start.bat` after preparing dependencies. The launcher waits for service readiness and records only this checkout's processes in `.runtime/`; it does not kill unrelated processes by port. Use `stop.bat` to stop this checkout's services.
 
-Open `http://localhost:5173` to access the admin panel.
+Before the first launch:
+1. Create `python-core/.venv` with Python 3.12 and install `python-core/requirements-dev.txt`.
+2. Run `npm ci` in `frontend`.
+3. Ensure the local embedding model (`BAAI/bge-small-zh-v1.5`) is available under `python-core/data/models/`.
+
+Open the frontend URL printed by the launcher to access the admin panel. The launcher also moves Python from port 8000 to the next free port when needed and passes that address to Java. Use `powershell -File scripts/services.ps1 -Action status` to see the selected ports, or `-Action url` to retrieve the frontend URL later.
 
 To start services individually:
 
-```bash
-cd python-core
-python -m uvicorn main:app --host 127.0.0.1 --port 8000
+From the repository root, run each command in a separate terminal:
 
-cd java-manager
-mvn spring-boot:run
-
-cd frontend
-npm run dev
+```powershell
+python-core/.venv/Scripts/python.exe -m uvicorn main:app --app-dir python-core --host 127.0.0.1 --port 8000
+mvn -f java-manager/pom.xml spring-boot:run
+npm --prefix frontend run dev
 ```
 
 ### 4. Connect QQ
 
 1. Download and install [NapCat QQ](https://github.com/NapNeko/NapCatQQ)
-2. Configure OneBot WebSocket to `ws://127.0.0.1:8080/ws/onebot`
+2. Configure NapCat reverse OneBot WebSocket to `ws://127.0.0.1:8080/ws/qq`
 3. Create a persona via the admin panel → Matchmaker interview
 
 ### 5. Stop
@@ -181,7 +181,7 @@ npm run dev
 
 ### Supported LLM Providers
 
-The system uses OpenAI SDK for compatibility. Supported providers:
+DeepSeek, OpenAI, and custom endpoints use the OpenAI SDK; Anthropic uses its native Messages API. Supported providers:
 
 | Provider | Chat | Image Generation |
 |----------|------|------------------|
@@ -208,6 +208,7 @@ Image generation runs in two modes:
 
 ## Documentation
 
+- [docs/demo-guide.md](docs/demo-guide.md) — 中文演示部署、验证命令与 NapCat/QQ 接入说明
 - [docs/CONTEXT.md](docs/CONTEXT.md) — Domain model, terminology, and architectural boundaries
 - [docs/database-schema.md](docs/database-schema.md) — Complete database schema reference
 

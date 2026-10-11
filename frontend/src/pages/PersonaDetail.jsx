@@ -1,8 +1,9 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import PersonaEditPanel from '../components/PersonaEditPanel'
 import { useToast } from '../components/Toast'
 import { useLocale } from '../LocaleContext'
+import { requestJson } from '../api'
 
 export default function PersonaDetail() {
   const { id } = useParams()
@@ -12,19 +13,33 @@ export default function PersonaDetail() {
   const [events, setEvents] = useState([])
   const [thought, setThought] = useState(null)
   const [qqInput, setQqInput] = useState(persona?.aiQq || '')
+  const [ownerInput, setOwnerInput] = useState('')
+  const [refreshing, setRefreshing] = useState(false)
+  const [binding, setBinding] = useState(false)
+  const [error, setError] = useState('')
 
-  const bindQQ = async (qq) => {
-    if (!qq.trim()) return
+  const bindQQ = async (qq, type = 'qq') => {
+    if (binding) return
+    const account = qq.trim()
+    if (account && !/^\d{5,15}$/.test(account)) {
+      toast.error(t('personaDetail.qqInvalid'))
+      return
+    }
+    setBinding(true)
     try {
-      await fetch(`/api/personas/${id}/bind-channel`, {
+      await requestJson(`/api/personas/${id}/bind-channel`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ type: 'qq', account: qq.trim() }),
+        body: JSON.stringify({ type, account }),
       })
-      setPersona(prev => ({ ...prev, aiQq: qq.trim() }))
+      setPersona(await requestJson(`/api/personas/${id}`))
       toast.success(t('personaDetail.qqBindSuccess'))
     } catch {
+      setQqInput(persona?.aiQq || '')
+      setOwnerInput(persona?.ownerQq || '')
       toast.error(t('personaDetail.qqBindFailed'))
+    } finally {
+      setBinding(false)
     }
   }
 
@@ -34,32 +49,42 @@ export default function PersonaDetail() {
 
   // 当 persona 数据从外部更新时，同步 QQ 输入框状态
   useEffect(() => {
-    if (persona?.aiQq !== undefined) {
-      setQqInput(persona.aiQq || '')
+    setQqInput(persona?.aiQq || '')
+    setOwnerInput(persona?.ownerQq || '')
+  }, [persona?.aiQq, persona?.ownerQq])
+
+  const refreshData = useCallback(async (signal) => {
+    setRefreshing(true)
+    setError('')
+    try {
+      const [data, evts, tht, rel] = await Promise.all([
+        requestJson(`/api/personas/${id}`, { signal }),
+        requestJson(`/api/events/${id}/today`, { signal }),
+        requestJson(`/api/events/${id}/thought`, { signal }),
+        requestJson(`/api/relationships/${id}`, { signal }),
+      ])
+      if (signal?.aborted) return
+      setPersona(data)
+      setEvents(Array.isArray(evts) ? evts : [])
+      setThought(tht?.raw_thought || tht?.detailJson ? tht : null)
+      setRelationState(rel)
+    } catch (err) {
+      if (!signal?.aborted) setError(err.message)
+    } finally {
+      if (!signal?.aborted) {
+        setRefreshing(false)
+        setLoading(false)
+      }
     }
-  }, [persona?.aiQq])
+  }, [id])
 
   useEffect(() => {
-    fetch(`/api/personas/${id}`)
-      .then(r => r.json())
-      .then(data => {
-        setPersona(data)
-        setQqInput(data.aiQq || '')
-        return Promise.all([
-          fetch(`/api/events/${id}/today`).then(r => r.json()).catch(() => []),
-          fetch(`/api/events/${id}/thought`).then(r => r.json()).catch(() => null),
-        ])
-      })
-      .then(([evts, tht]) => {
-        setEvents(Array.isArray(evts) ? evts : [])
-        setThought(tht)
-        return fetch(`/api/relationships/${id}`).then(r => r.json()).catch(() => null)
-      })
-      .then(rel => {
-        setRelationState(rel)
-      })
-      .finally(() => setLoading(false))
-  }, [id])
+    const controller = new AbortController()
+    setLoading(true)
+    setPersona(null)
+    refreshData(controller.signal)
+    return () => controller.abort()
+  }, [refreshData])
 
   if (loading) return (
     <div className="animate-pulse max-w-3xl mx-auto pt-8 space-y-6">
@@ -75,6 +100,8 @@ export default function PersonaDetail() {
   if (!persona) return (
     <div className="glass-card rounded-3xl p-12 text-center max-w-md mx-auto mt-20">
       <h3 className="font-serif text-lg text-ink mb-2">{t('common.notFound')}</h3>
+      {error && <p role="alert" className="text-sm text-red-600 mb-4">{error}</p>}
+      <button onClick={() => refreshData()} className="btn-jade text-sm mr-2">{t('common.retry')}</button>
       <Link to="/" className="btn-jade text-sm inline-block">{t('common.backToList')}</Link>
     </div>
   )
@@ -91,7 +118,9 @@ export default function PersonaDetail() {
       {/* 顶部导航 */}
       <div className="flex items-center justify-between mb-6 pt-4">
         <Link to="/" className="text-sm text-ink-soft hover:text-jade-600 transition-colors">{'← ' + t('common.back')}</Link>
+        <button onClick={() => refreshData()} disabled={refreshing} className="text-sm text-jade-600 disabled:opacity-40 ml-auto mr-3">{t('common.refresh')}</button>
         <button onClick={() => setDrawerOpen(true)}
+          aria-label={t('editPanel.title')}
           className="w-9 h-9 rounded-full flex items-center justify-center hover:bg-jade-50 transition-colors">
           <svg className="w-5 h-5 text-ink-soft" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="1.5">
             <path strokeLinecap="round" strokeLinejoin="round" d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.324.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 011.37.49l1.296 2.247a1.125 1.125 0 01-.26 1.431l-1.003.827c-.293.24-.438.613-.431.992a6.759 6.759 0 010 .255c-.007.378.138.75.43.99l1.005.828c.424.35.534.954.26 1.43l-1.298 2.247a1.125 1.125 0 01-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.57 6.57 0 01-.22.128c-.331.183-.581.495-.644.869l-.213 1.28c-.09.543-.56.941-1.11.941h-2.594c-.55 0-1.02-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 01-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 01-1.369-.49l-1.297-2.247a1.125 1.125 0 01.26-1.431l1.004-.827c.292-.24.437-.613.43-.992a6.932 6.932 0 010-.255c.007-.378-.138-.75-.43-.99l-1.004-.828a1.125 1.125 0 01-.26-1.43l1.297-2.247a1.125 1.125 0 011.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.087.22-.128.332-.183.582-.495.644-.869l.214-1.281z" />
@@ -99,6 +128,7 @@ export default function PersonaDetail() {
           </svg>
         </button>
       </div>
+      {error && <p role="alert" className="text-sm text-red-600 mb-4">{error}</p>}
 
       {/* 头部 */}
       <div className="glass-card rounded-2xl p-6 mb-5">
@@ -110,26 +140,40 @@ export default function PersonaDetail() {
           <div>
             <h1 className="font-serif text-2xl font-semibold text-jade-700">{name}</h1>
             <p className="text-ink-soft text-sm mt-1 line-clamp-2">{ctx}</p>
-            <div className="flex items-center gap-2 mt-2">
+            <div className="flex items-center gap-2 mt-2 flex-wrap">
               <span className={`inline-block w-2 h-2 rounded-full ${
                 status === 'active' ? 'bg-jade-400' : status === 'paused' ? 'bg-amber-warm' : 'bg-ink-soft/20'
               }`} />
               <span className="text-xs text-ink-soft/60">
                 {status === 'active' ? t('personaDetail.statusActive') : status === 'paused' ? t('personaDetail.statusPaused') : t('personaDetail.statusArchived')}
               </span>
-              <span className="text-xs text-ink-soft/30 mx-1">|</span>
-              <input
-                value={qqInput}
-                onChange={e => setQqInput(e.target.value)}
-                onBlur={e => { if (e.target.value !== (persona.aiQq || '')) bindQQ(e.target.value) }}
-                placeholder={t('personaDetail.qqPlaceholder')}
-                title={t('personaDetail.qqTitle')}
-                className="text-xs bg-transparent border-b border-dashed border-jade-600/20 w-28 px-1 py-0.5 focus:outline-none focus:border-jade-400 text-ink"
-              />
-
             </div>
           </div>
         </div>
+      </div>
+
+      <div className="glass-card rounded-2xl p-6 mb-5">
+        <h2 className="font-serif text-lg font-semibold text-jade-600 mb-3">{t('editPanel.channelBinding')}</h2>
+        <p className="text-xs text-ink-soft mb-4">{t('personaDetail.qqBindingHint')}</p>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div>
+            <label htmlFor="bot-qq" className="block text-xs text-ink-soft mb-1">{t('editPanel.aiQq')}</label>
+            <input id="bot-qq" value={qqInput} inputMode="numeric" disabled={binding}
+              onChange={e => setQqInput(e.target.value)}
+              onBlur={e => { if (e.target.value.trim() !== (persona.aiQq || '')) bindQQ(e.target.value) }}
+              placeholder={t('personaDetail.qqPlaceholder')}
+              className="w-full min-w-0 rounded-xl px-3 py-2.5 text-sm bg-white/60 border border-jade-600/10 focus:outline-none focus:border-jade-400/40" />
+          </div>
+          <div>
+            <label htmlFor="owner-qq" className="block text-xs text-ink-soft mb-1">{t('editPanel.ownerQq')}</label>
+            <input id="owner-qq" value={ownerInput} inputMode="numeric" disabled={binding}
+              onChange={e => setOwnerInput(e.target.value)}
+              onBlur={e => { if (e.target.value.trim() !== (persona.ownerQq || '')) bindQQ(e.target.value, 'owner-qq') }}
+              placeholder={t('editPanel.ownerQqPlaceholder')}
+              className="w-full min-w-0 rounded-xl px-3 py-2.5 text-sm bg-white/60 border border-jade-600/10 focus:outline-none focus:border-jade-400/40" />
+          </div>
+        </div>
+        {(!persona.aiQq || !persona.ownerQq) && <p className="text-xs text-amber-700 mt-3">{t('personaDetail.qqIncomplete')}</p>}
       </div>
 
       {/* 关系阶段可视化 */}
@@ -165,11 +209,13 @@ export default function PersonaDetail() {
       <TestChat personaId={id} personaName={name} toast={toast} />
 
       {/* 操作区 */}
-      <div className="flex items-center gap-3 mb-12">
+      <div className="flex items-center flex-wrap gap-3 mb-12">
         <button
           onClick={async () => {
-            await fetch(`/api/personas/${id}/toggle`, { method: 'POST' })
-            setPersona(prev => ({ ...prev, status: prev.status === 'active' ? 'paused' : 'active' }))
+            try {
+              await requestJson(`/api/personas/${id}/toggle`, { method: 'POST' })
+              await refreshData()
+            } catch { toast.error(t('settings.saveFailed')) }
           }}
           className={`px-5 py-2.5 rounded-full text-sm font-medium transition-all ${
             status === 'active'
@@ -180,13 +226,16 @@ export default function PersonaDetail() {
         </button>
         <button
           onClick={async () => {
-            const r = await fetch(`/api/personas/${id}/export`)
-            const blob = await r.blob()
-            const url = URL.createObjectURL(blob)
-            const a = document.createElement('a')
-            a.href = url
-            a.download = `${name || 'persona'}.json`
-            a.click()
+            try {
+              const r = await fetch(`/api/personas/${id}/export`)
+              if (!r.ok) throw new Error(`HTTP ${r.status}`)
+              const url = URL.createObjectURL(await r.blob())
+              const a = document.createElement('a')
+              a.href = url
+              a.download = `${name || 'persona'}.json`
+              a.click()
+              URL.revokeObjectURL(url)
+            } catch { toast.error(t('settings.saveFailed')) }
           }}
           className="px-5 py-2.5 rounded-full text-sm font-medium bg-jade-50 text-jade-600 hover:bg-jade-100 transition-all">
           {t('personaDetail.export')}
@@ -194,8 +243,10 @@ export default function PersonaDetail() {
         <button
           onClick={async () => {
             if (!window.confirm(t('personaDetail.confirmArchive'))) return
-            await fetch(`/api/personas/${id}/archive`, { method: 'POST' })
-            window.location.href = '/'
+            try {
+              await requestJson(`/api/personas/${id}/archive`, { method: 'POST' })
+              window.location.href = '/'
+            } catch { toast.error(t('settings.saveFailed')) }
           }}
           className="px-5 py-2.5 rounded-full text-sm font-medium bg-red-50 text-red-400 hover:bg-red-100 transition-all ml-auto">
           {t('common.archive')}
@@ -205,14 +256,7 @@ export default function PersonaDetail() {
       {/* 编辑面板 */}
       {drawerOpen && (
         <PersonaEditPanel persona={persona} onClose={() => setDrawerOpen(false)}
-          onSaved={() => {
-            fetch(`/api/personas/${id}`)
-              .then(r => r.json())
-              .then(data => {
-                setPersona(data)
-                setQqInput(data.aiQq || '')
-              })
-          }} />
+          onSaved={() => refreshData()} />
       )}
     </div>
   )

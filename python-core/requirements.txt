@@ -11,6 +11,9 @@ uvicorn[standard]>=0.27,<1.0
 # OpenAI Python SDK（支持 DeepSeek 换 base_url / Anthropic 兼容接口）
 openai>=1.30,<2.0
 
+# Native Anthropic Messages API; also used by Mem0 for Claude memory.
+anthropic>=0.49,<1.0
+
 # 数据校验（FastAPI 已自带，但 Maven openapi-generator 生成需要）
 pydantic>=2.5,<3.0
 
@@ -21,6 +24,10 @@ mem0ai>=0.1.0,<1.0
 # 注意：chromadb >=0.5.0 已从 Apache 2.0 变更为专有源码可用许可证。
 # 此处锁定最后一个 Apache 2.0 版本以确保开源合规。
 chromadb>=0.4.23,<0.5.0
+
+# ChromaDB 0.4 uses np.float_ (removed in NumPy 2) and the legacy PostHog API.
+numpy>=1.26,<2.0
+posthog>=2.4,<4.0
 
 # Mem0 依赖的本地嵌入模型（无 GPU 时自动 fallback CPU）
 sentence-transformers>=2.5.0,<4.0
